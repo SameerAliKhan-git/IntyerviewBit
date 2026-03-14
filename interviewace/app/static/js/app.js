@@ -1,175 +1,314 @@
 /**
- * app.js — InterviewAce Main Application Logic
- * 
- * Implements the full interview flow:
- * 1. User clicks Start → WebSocket connects → Agent greets via AUDIO
- * 2. Agent asks questions via speech, user answers via speech
- * 3. Agent scores silently (tool calls update dashboard)
- * 4. User clicks End → Agent gives closing → Feedback panel shown
- * 
- * Handles the official ADK event format from event.model_dump_json().
+ * app.js - InterviewAce Google Meet Clone Engine
+ * Manages WebSocket, WebRTC, Visualizers, Transcripts (CC), and Multi-Agent UI.
  */
 
+// -- Google Meet Volume Visualizer --
+class VolumeVisualizer {
+    constructor(analyserNode, ringsId, equalizerId, tileId) {
+        this.analyser = analyserNode;
+        this.bufferLength = this.analyser.frequencyBinCount;
+        this.dataArray = new Uint8Array(this.bufferLength);
+        
+        this.tile = document.getElementById(tileId);
+        
+        const ringsContainer = document.getElementById(ringsId);
+        this.rings = ringsContainer ? Array.from(ringsContainer.querySelectorAll('.ring')) : [];
+        
+        const eqContainer = document.getElementById(equalizerId);
+        this.eqBars = eqContainer ? Array.from(eqContainer.querySelectorAll('.bar')) : [];
+        if (eqContainer) this.eqContainer = eqContainer;
+        
+        // Hide mic icon if eq exists
+        this.micIcon = this.tile ? this.tile.querySelector('.mic-icon') : null;
+        
+        this.isAnimating = false;
+        this.smoothedVol = 0;
+    }
+
+    start() {
+        if (!this.isAnimating) {
+            this.isAnimating = true;
+            this.draw();
+        }
+    }
+
+    stop() {
+        this.isAnimating = false;
+        
+        this.rings.forEach(r => { r.style.transform = 'scale(1)'; r.style.opacity = '0'; });
+        this.eqBars.forEach(b => b.style.height = '4px');
+        
+        if (this.tile) this.tile.classList.remove('tile-speaking');
+        if (this.eqContainer) this.eqContainer.style.display = 'none';
+        if (this.micIcon) this.micIcon.style.display = 'inline-block';
+    }
+
+    draw() {
+        if (!this.isAnimating) return;
+        requestAnimationFrame(() => this.draw());
+
+        this.analyser.getByteFrequencyData(this.dataArray);
+        
+        // Calculate RMS volume
+        let sum = 0;
+        for (let i = 0; i < this.bufferLength; i++) {
+            sum += this.dataArray[i];
+        }
+        let avg = sum / this.bufferLength;
+        let vol = avg / 128.0; // roughly 0.0 to 1.5+
+        
+        // Smooth changes
+        this.smoothedVol = this.smoothedVol * 0.7 + vol * 0.3;
+        
+        // Threshold for speaking
+        const isSpeaking = this.smoothedVol > 0.05;
+
+        // Tile glow
+        if (this.tile) {
+            if (isSpeaking) this.tile.classList.add('tile-speaking');
+            else this.tile.classList.remove('tile-speaking');
+        }
+
+        // Toggle mic icon / equalizer
+        if (isSpeaking && this.eqContainer) {
+            this.eqContainer.style.display = 'flex';
+            if (this.micIcon) this.micIcon.style.display = 'none';
+        } else {
+            if (this.eqContainer) this.eqContainer.style.display = 'none';
+            if (this.micIcon) this.micIcon.style.display = 'inline-block';
+        }
+
+        // Scale Rings (Avatar halo)
+        if (this.rings.length === 3) {
+            if (isSpeaking) {
+                const s1 = Math.min(1 + this.smoothedVol * 0.3, 1.4);
+                const s2 = Math.min(1 + this.smoothedVol * 0.6, 1.8);
+                const s3 = Math.min(1 + this.smoothedVol * 1.0, 2.3);
+                
+                this.rings[0].style.transform = `scale(${s1})`;
+                this.rings[1].style.transform = `scale(${s2})`;
+                this.rings[2].style.transform = `scale(${s3})`;
+                
+                this.rings.forEach(r => r.style.opacity = '0.4');
+            } else {
+                this.rings.forEach(r => {
+                    r.style.transform = 'scale(1)';
+                    r.style.opacity = '0';
+                });
+            }
+        }
+
+        // Jiggle Equalizer bars
+        if (isSpeaking && this.eqBars.length === 3) {
+            this.eqBars[0].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
+            this.eqBars[1].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 20 * Math.random() + 6))}px`;
+            this.eqBars[2].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
+        }
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("🚀 InterviewAce initializing...");
+    console.log("🚀 InterviewAce Meet Mode initializing...");
 
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
     const sessionId = 'session_' + Math.random().toString(36).substr(2, 11);
 
-    // ── Controllers ──
-    const dashboard = new window.Dashboard();
+    // Hardware state
     const camera = new window.CameraManager();
     let audioRecorder = null;
     let audioPlayer = null;
     let audioContext = null;
+    let userVisualizer = null;
+    let agentVisualizer = null;
 
-    // ── State ──
+    // Conneciton state
     let ws = null;
     let isInterviewActive = false;
-    let sessionStart = null;
-    let timerInterval = null;
-    let questionsAsked = 0;
-    let allFeedback = [];
+    let dialogueHistory = [];
+    let finalScores = {};
+    let ccTimeout = null;
 
-    // ── UI Elements ──
-    const statusDot = document.getElementById('connectionStatus');
-    const statusText = document.getElementById('statusText');
-    const transcriptArea = document.getElementById('transcriptArea');
-    const coachVisualizer = document.getElementById('coachVisualizer');
-    const recordingBadge = document.getElementById('recordingBadge');
-    const feedbackPanel = document.getElementById('feedbackPanel');
-    const feedbackContent = document.getElementById('feedbackContent');
-
+    // DOM Elements
     const startBtn = document.getElementById('startBtn');
+    const endBtn = document.getElementById('endBtn');
     const micBtn = document.getElementById('micBtn');
     const cameraBtn = document.getElementById('cameraBtn');
-    const endBtn = document.getElementById('endBtn');
-    const voiceSelect = document.getElementById('voiceSelect');
+    const ccBtn = document.getElementById('ccBtn');
+    
+    // Status Elements
+    const thinkingOverlay = document.getElementById('thinkingOverlay');
+    const transcribingBadge = document.getElementById('transcribingBadge');
+    const agentMicIcon = document.getElementById('agentMicIcon');
+    const userMicIcon = document.getElementById('userMicIcon');
+    const clockTime = document.getElementById('clockTime');
 
-    // ══════════════════════════════════════════
-    // START INTERVIEW
-    // ══════════════════════════════════════════
+    // Captions Elements
+    const ccContainer = document.getElementById('ccContainer');
+    const ccAvatar = document.getElementById('ccAvatar');
+    const ccName = document.getElementById('ccName');
+    const ccText = document.getElementById('ccText');
+    let ccEnabled = true;
+
+    // Update real clock
+    setInterval(() => {
+        const d = new Date();
+        clockTime.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }, 1000);
+
+    // TOAST NOTIFICATIONS
+    const toastContainer = document.getElementById('toastContainer');
+    function showToast(message) {
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = message;
+        toastContainer.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+
+    // Attach Toast to all interaction buttons
+    document.querySelectorAll('.interaction-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.getAttribute('data-action');
+            if (action) showToast(`"${action}" is disabled during a mock interview.`);
+        });
+    });
+
+    // ==========================================
+    // EVENT LISTENERS
+    // ==========================================
+    
     startBtn.addEventListener('click', async () => {
         if (isInterviewActive) return;
         
         try {
-            // Initialize audio context on user gesture (required by browsers)
             audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
             if (audioContext.state === 'suspended') await audioContext.resume();
 
             audioPlayer = new window.AudioPlayer(audioContext);
             audioRecorder = new window.AudioRecorder(audioContext);
 
-            // Start camera
+            // Start hardware
             const camOk = await camera.start();
             if (camOk) {
                 document.getElementById('videoOverlay').style.display = 'none';
+                cameraBtn.classList.remove('disabled-state');
+                cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
                 camera.startFrameExtraction((b64) => {
                     sendJson({ type: "image", mimeType: "image/jpeg", data: b64 });
                 });
             }
 
-            // Connect WebSocket with selected voice
-            connectWebSocket(voiceSelect.value);
+            // Visualizers setup (Google Meet Volume Rings)
+            agentVisualizer = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
+            userVisualizer = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
+            agentVisualizer.start();
+            userVisualizer.start();
 
-            // Update UI
-            startBtn.disabled = true;
-            startBtn.innerHTML = '<span>Connecting...</span>';
-            voiceSelect.disabled = true;
+            // Connect
+            connectWebSocket('Kore');
+
+            startBtn.style.display = 'none';
+            endBtn.style.display = 'flex';
         } catch (e) {
-            console.error("❌ Failed to start:", e);
-            appendTranscript("Failed to initialize. Please allow mic/camera access.", "system");
+            console.error("❌ Init error:", e);
         }
     });
 
-    // ══════════════════════════════════════════
-    // END INTERVIEW
-    // ══════════════════════════════════════════
     endBtn.addEventListener('click', () => {
         if (!isInterviewActive) return;
-        // Tell the agent to end and generate report
-        sendJson({ type: "text", text: "I'd like to end the interview now. Please give me my final assessment." });
-        appendTranscript("Ending interview...", "system");
         
-        // Wait a moment for the agent to respond, then show feedback
+        // Clean wrap-up
+        sendJson({ type: "text", text: "I'd like to end the interview now. Please finalize the score." });
+        thinkingOverlay.style.display = 'block';
+
+        // Wait for final functions, then show Modal
         setTimeout(() => {
-            showFeedbackPanel();
             cleanup();
-        }, 8000);
+            showFeedbackPanel();
+        }, 4000);
     });
 
-    // ══════════════════════════════════════════
-    // MIC TOGGLE
-    // ══════════════════════════════════════════
     micBtn.addEventListener('click', () => {
         if (!audioRecorder) return;
-        const isActive = audioRecorder.toggleMute();
-        micBtn.classList.toggle('active', isActive);
-        micBtn.innerHTML = isActive
-            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>'
-            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
+        const isMuted = !audioRecorder.toggleMute();
+        
+        if (isMuted) {
+            micBtn.classList.add('disabled-state');
+            micBtn.innerHTML = '<span class="material-icons">mic_off</span>';
+            userMicIcon.textContent = 'mic_off';
+            userMicIcon.classList.add('red-icon');
+            showToast("Microphone muted");
+        } else {
+            micBtn.classList.remove('disabled-state');
+            micBtn.innerHTML = '<span class="material-icons">mic</span>';
+            userMicIcon.textContent = 'mic';
+            userMicIcon.classList.remove('red-icon');
+            showToast("Microphone turned on");
+        }
     });
 
-    // ══════════════════════════════════════════
-    // CAMERA TOGGLE
-    // ══════════════════════════════════════════
     cameraBtn.addEventListener('click', () => {
         const isOn = camera.toggle();
-        cameraBtn.classList.toggle('active', isOn);
-        document.getElementById('videoOverlay').style.display = isOn ? 'none' : 'flex';
+        if (isOn) {
+            cameraBtn.classList.remove('disabled-state');
+            cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
+            document.getElementById('videoOverlay').style.display = 'none';
+            showToast("Camera turned on");
+        } else {
+            cameraBtn.classList.add('disabled-state');
+            cameraBtn.innerHTML = '<span class="material-icons">videocam_off</span>';
+            document.getElementById('videoOverlay').style.display = 'flex';
+            showToast("Camera turned off");
+        }
     });
 
-    // ══════════════════════════════════════════
-    // WEBSOCKET CONNECTION
-    // ══════════════════════════════════════════
+    ccBtn.addEventListener('click', () => {
+        ccEnabled = !ccEnabled;
+        if (ccEnabled) {
+            ccBtn.classList.add('active');
+            showToast("Captions turned on");
+        } else {
+            ccBtn.classList.remove('active');
+            ccContainer.style.display = 'none';
+            showToast("Captions turned off");
+        }
+    });
+
+    // ==========================================
+    // WEBSOCKET LOGIC
+    // ==========================================
     function connectWebSocket(voiceName) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}?voice=${voiceName}`;
-        
-        statusText.textContent = "Connecting...";
         ws = new WebSocket(wsUrl);
 
         ws.onopen = async () => {
-            console.log("✅ WebSocket connected");
-            statusText.textContent = "Interview Active";
-            statusDot.className = "status-dot connected";
             isInterviewActive = true;
+            thinkingOverlay.style.display = 'block';
+            
+            // Enable buttons
+            ccBtn.disabled = false;
+            ccBtn.classList.add('active'); // Default ON
 
-            // Update UI
-            startBtn.style.display = 'none';
-            micBtn.disabled = false;
-            micBtn.classList.add('active');
-            cameraBtn.disabled = false;
-            cameraBtn.classList.add('active');
-            endBtn.disabled = false;
-            recordingBadge.style.display = 'inline-flex';
+            // Setup mic defaults
+            micBtn.classList.remove('disabled-state');
+            micBtn.innerHTML = '<span class="material-icons">mic</span>';
+            userMicIcon.textContent = 'mic';
+            userMicIcon.classList.remove('red-icon');
 
-            // Start timer
-            sessionStart = Date.now();
-            timerInterval = setInterval(updateTimer, 1000);
-
-            // Clear transcript
-            transcriptArea.innerHTML = '';
-
-            // 🚀 TRIGGER THE AGENT TO SPEAK FIRST 🚀
+            // Trigger Agent
             setTimeout(() => {
-                sendJson({ 
-                    type: "text", 
-                    text: "Hello, I am ready to start my mock interview." 
-                });
+                sendJson({ type: "text", text: "Hello, I have joined the meet." });
             }, 500);
 
-            // Start microphone — send raw binary PCM
             try {
                 await audioRecorder.start((pcmBytes) => {
                     if (ws && ws.readyState === WebSocket.OPEN) {
                         ws.send(pcmBytes);
                     }
                 });
-                console.log("🎤 Microphone streaming started");
-            } catch (e) {
-                console.error("❌ Mic failed:", e);
-            }
+            } catch (e) {}
         };
 
         ws.onmessage = (event) => {
@@ -183,151 +322,144 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
 
-        ws.onclose = () => {
-            console.log("🔌 WebSocket closed");
-            if (isInterviewActive) {
-                statusText.textContent = "Disconnected";
-                statusDot.className = "status-dot disconnected";
-            }
-        };
-
-        ws.onerror = (e) => console.error("WS error:", e);
+        ws.onclose = () => { isInterviewActive = false; };
     }
 
-    // ══════════════════════════════════════════
-    // HANDLE ADK EVENTS (official format)
-    // ══════════════════════════════════════════
+    // ==========================================
+    // EVENT HANDLING & MULTI-AGENT SIM
+    // ==========================================
     function handleAdkEvent(evt) {
-        // ── Agent content (text or audio parts) ──
+        // Agent speaking
         if (evt.content && evt.content.parts) {
+            thinkingOverlay.style.display = 'none';
+            agentMicIcon.textContent = 'mic';
+            agentMicIcon.classList.remove('red-icon');
+
             for (const part of evt.content.parts) {
-                // Text response (half-cascade mode or transcription)
-                if (part.text) {
-                    appendTranscript(part.text, 'coach');
-                }
-                // Audio response (native audio mode)
+                if (part.text) dialogueHistory.push(`[Coach Ace]: ${part.text}`);
                 if (part.inline_data && part.inline_data.data) {
-                    if (audioPlayer) {
-                        audioPlayer.playBase64(part.inline_data.data);
-                        coachVisualizer.classList.add('speaking');
-                    }
+                    if (audioPlayer) audioPlayer.playBase64(part.inline_data.data);
                 }
             }
         }
 
-        // ── Transcriptions (native audio model) ──
+        // Transcriptions / CC (Elena - Notetaker actions)
         if (evt.server_content) {
             const sc = evt.server_content;
+            
             if (sc.input_transcription && sc.input_transcription.trim()) {
-                appendTranscript(sc.input_transcription, 'user');
+                dialogueHistory.push(`[You]: ${sc.input_transcription}`);
+                thinkingOverlay.style.display = 'block';
+                showCaption('You', 'Y', 'bg-green', sc.input_transcription);
+                pulseNotetaker();
             }
             if (sc.output_transcription && sc.output_transcription.trim()) {
-                appendTranscript(sc.output_transcription, 'coach');
+                showCaption('Coach Ace', 'C', 'bg-blue', sc.output_transcription);
+                pulseNotetaker();
             }
         }
 
-        // ── Tool calls (score updates from save_session_feedback) ──
+        // Tool execution
         if (evt.actions && evt.actions.function_calls) {
             for (const fc of evt.actions.function_calls) {
-                console.log("🔧 Tool:", fc.name, fc.args);
+                pulseNotetaker(); // Simulate Elena typing out the scores silently
+                
                 if (fc.name === "save_session_feedback" && fc.args) {
-                    questionsAsked = fc.args.question_number || questionsAsked + 1;
-                    document.getElementById('statQuestions').textContent = questionsAsked;
-
-                    // Update live dashboard scores
-                    dashboard.updateScores({
-                        confidence: fc.args.confidence_score || 0,
-                        clarity: fc.args.clarity_score || 0,
-                        body_language: fc.args.body_language_score || 0,
-                        content: fc.args.content_score || 0,
-                    });
-
-                    // Store feedback for end panel
-                    allFeedback.push({
-                        q: questionsAsked,
-                        strengths: fc.args.strengths || "",
-                        improvements: fc.args.improvements || "",
-                        summary: fc.args.feedback_summary || "",
-                    });
-                }
-
-                if (fc.name === "get_interview_question") {
-                    questionsAsked++;
-                    document.getElementById('statQuestions').textContent = questionsAsked;
+                    finalScores = {
+                        confidence: fc.args.confidence_score || finalScores.confidence,
+                        clarity: fc.args.clarity_score || finalScores.clarity,
+                        body_language: fc.args.body_language_score || finalScores.body_language,
+                        content: fc.args.content_score || finalScores.content,
+                        strengths: fc.args.strengths || finalScores.strengths,
+                        improvements: fc.args.improvements || finalScores.improvements,
+                    };
                 }
             }
         }
 
-        // ── Turn complete ──
-        if (evt.turn_complete) {
-            coachVisualizer.classList.remove('speaking');
-        }
-
-        // ── Interrupted (barge-in: agent stopped because user started talking) ──
-        if (evt.interrupted) {
-            coachVisualizer.classList.remove('speaking');
-            if (audioPlayer) audioPlayer.stop();
+        if (evt.turn_complete || evt.interrupted) {
+            agentMicIcon.textContent = 'mic_off';
+            agentMicIcon.classList.add('red-icon');
+            thinkingOverlay.style.display = 'none';
+            if (evt.interrupted && audioPlayer) audioPlayer.stop();
         }
     }
 
-    // ══════════════════════════════════════════
-    // HELPERS
-    // ══════════════════════════════════════════
+    // ==========================================
+    // UI HELPERS
+    // ==========================================
     function sendJson(obj) {
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(obj));
         }
     }
 
-    function appendTranscript(text, role) {
-        if (!text || !text.trim()) return;
-        const el = document.createElement('div');
-        el.className = `msg ${role}`;
-        if (role === 'user') el.innerHTML = `<strong>You:</strong> ${text}`;
-        else if (role === 'coach') el.innerHTML = `<strong>Coach Ace:</strong> ${text}`;
-        else el.innerHTML = `<em>${text}</em>`;
-        transcriptArea.appendChild(el);
-        transcriptArea.scrollTop = transcriptArea.scrollHeight;
+    function pulseNotetaker() {
+        transcribingBadge.style.display = 'flex';
+        clearTimeout(ccTimeout);
+        ccTimeout = setTimeout(() => {
+            transcribingBadge.style.display = 'none';
+        }, 3000);
     }
 
-    function updateTimer() {
-        if (!sessionStart) return;
-        const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
-        const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
-        const s = String(elapsed % 60).padStart(2, '0');
-        document.getElementById('statDuration').textContent = `${m}:${s}`;
+    function showCaption(name, initial, colorClass, text) {
+        if (!ccEnabled) return;
+        ccContainer.style.display = 'flex';
+        ccName.textContent = name;
+        ccText.textContent = text;
+        
+        ccAvatar.className = `cc-avatar ${colorClass}`;
+        ccAvatar.textContent = initial;
+
+        clearTimeout(ccTimeout);
+        ccTimeout = setTimeout(() => {
+            ccContainer.style.display = 'none';
+        }, 6000);
     }
 
     function showFeedbackPanel() {
-        feedbackPanel.style.display = 'block';
-        let html = '';
-        if (allFeedback.length === 0) {
-            html = '<p>No detailed feedback available yet.</p>';
-        } else {
-            for (const fb of allFeedback) {
-                html += `<div class="feedback-item">
-                    <h4>Question ${fb.q}</h4>
-                    <p><strong>Strengths:</strong> ${fb.strengths || 'N/A'}</p>
-                    <p><strong>To Improve:</strong> ${fb.improvements || 'N/A'}</p>
-                    ${fb.summary ? `<p>${fb.summary}</p>` : ''}
-                </div>`;
-            }
-        }
-        feedbackContent.innerHTML = html;
+        document.getElementById('feedbackPanel').style.display = 'flex';
+        
+        const ovr = Math.round(((finalScores.confidence||0) + (finalScores.clarity||0) + (finalScores.body_language||0) + (finalScores.content||0)) / 4) || 0;
+        
+        document.getElementById('scoreOverall').textContent = `${ovr}`;
+        document.getElementById('scoreConfidence').textContent = finalScores.confidence || 0;
+        document.getElementById('scoreClarity').textContent = finalScores.clarity || 0;
+        document.getElementById('scoreContent').textContent = finalScores.content || 0;
+        document.getElementById('scoreBody').textContent = finalScores.body_language || 0;
+        
+        let html = `<p><strong>Elena's Summary Notes:</strong></p><br>`;
+        html += `<p><strong>Key Strengths:</strong><br>${finalScores.strengths || 'No data recorded yet.'}</p><br>`;
+        html += `<p><strong>Areas for Improvement:</strong><br>${finalScores.improvements || 'Keep practicing!'}</p>`;
+        
+        document.getElementById('feedbackContent').innerHTML = html;
+
+        // Enable download button
+        const dlBtn = document.getElementById('downloadTranscriptBtn');
+        dlBtn.disabled = false;
+        dlBtn.onclick = downloadTranscript;
+    }
+
+    function downloadTranscript() {
+        const textContent = "TECHNICAL MOCK INTERVIEW TRANSCRIPT\nTranscribed by: Elena (AI Notetaker)\n\n" + dialogueHistory.join("\n\n");
+        const blob = new Blob([textContent], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Interview_Transcript_${new Date().toISOString().split('T')[0]}.txt`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     function cleanup() {
         isInterviewActive = false;
-        if (timerInterval) clearInterval(timerInterval);
-        recordingBadge.style.display = 'none';
-        statusText.textContent = "Interview Ended";
-        statusDot.className = "status-dot disconnected";
         if (audioRecorder) audioRecorder.stop();
+        if (audioPlayer) audioPlayer.stop();
+        if (agentVisualizer) agentVisualizer.stop();
+        if (userVisualizer) userVisualizer.stop();
         if (camera) camera.stop();
-        micBtn.disabled = true;
-        cameraBtn.disabled = true;
-        endBtn.disabled = true;
-        // Don't close WS immediately — let agent finish response
-        setTimeout(() => { if (ws) ws.close(); }, 2000);
+        setTimeout(() => { if (ws) ws.close(); }, 1000);
     }
 });

@@ -1,6 +1,6 @@
 /**
  * audio-player.js — Plays back PCM audio received from the Gemini Live agent.
- * Receives base64-encoded PCM audio chunks and plays them through the speakers.
+ * Exposes AnalyserNode for visualization.
  */
 
 class AudioPlayer {
@@ -9,12 +9,17 @@ class AudioPlayer {
         this.queue = [];
         this.isPlaying = false;
         this.currentSource = null;
+        
+        // Add analyser for visualizer
+        this.analyser = this.context.createAnalyser();
+        this.analyser.fftSize = 256;
+        this.analyser.connect(this.context.destination);
     }
 
-    /**
-     * Play a base64-encoded PCM audio chunk from the agent.
-     * The Gemini Live API returns audio as base64 PCM 24kHz mono.
-     */
+    getAnalyser() {
+        return this.analyser;
+    }
+
     playBase64(base64Data) {
         try {
             const binaryString = atob(base64Data);
@@ -23,14 +28,12 @@ class AudioPlayer {
                 bytes[i] = binaryString.charCodeAt(i);
             }
 
-            // Convert PCM Int16 to Float32 for Web Audio
             const int16 = new Int16Array(bytes.buffer);
             const float32 = new Float32Array(int16.length);
             for (let i = 0; i < int16.length; i++) {
                 float32[i] = int16[i] / 32768.0;
             }
 
-            // The Gemini native audio output is 24kHz
             const sampleRate = 24000;
             const audioBuffer = this.context.createBuffer(1, float32.length, sampleRate);
             audioBuffer.getChannelData(0).set(float32);
@@ -54,7 +57,10 @@ class AudioPlayer {
         const buffer = this.queue.shift();
         const source = this.context.createBufferSource();
         source.buffer = buffer;
-        source.connect(this.context.destination);
+        
+        // Connect source to analyser (which is connected to destination)
+        source.connect(this.analyser);
+        
         source.onended = () => this._playNext();
         source.start(0);
         this.currentSource = source;
