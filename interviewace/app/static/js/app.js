@@ -260,10 +260,10 @@ document.addEventListener('DOMContentLoaded', () => {
             micBtn.innerHTML = '<span class="material-icons">mic</span>';
             userMicIcon.textContent = 'mic';
 
-            // Send greeting trigger immediately
+            // Send greeting trigger — minimal delay for instant agent response
             setTimeout(() => {
                 sendJson({ type: "text", text: "Hello, I have joined the meet." });
-            }, 600);
+            }, 200);
 
             // Start streaming mic audio
             try {
