@@ -20,7 +20,7 @@ from .tools import (
 
 root_agent = Agent(
     name="interview_ace",
-    model=os.getenv("AGENT_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025"),
+    model=os.getenv("AGENT_MODEL", "gemini-2.5-flash"),
     description=AGENT_DESCRIPTION,
     instruction=COACH_ACE_INSTRUCTION,
     tools=[

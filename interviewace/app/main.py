@@ -98,7 +98,7 @@ async def websocket_endpoint(
     # ========================================
 
     model_name = root_agent.model or ""
-    is_native_audio = "native-audio" in model_name.lower()
+    is_native_audio = "native-audio" in model_name.lower() or "gemini-2" in model_name.lower() or "gemini-live" in model_name.lower()
 
     if is_native_audio:
         run_config = RunConfig(
