@@ -1,7 +1,7 @@
 /**
  * audio-recorder.js
  * Wrapper for Web Audio API to record PCM audio from the microphone.
- * Adapted from Google ADK bidi-demo.
+ * Sends RAW BINARY PCM bytes over WebSocket (matching ADK bidi-demo pattern).
  */
 
 class AudioRecorder {
@@ -17,7 +17,7 @@ class AudioRecorder {
     async start(onDataCallback) {
         try {
             console.log("🎤 Requesting microphone access...");
-            this.stream = await navigator.mediaDevices.getUserMedia({ 
+            this.stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -32,32 +32,21 @@ class AudioRecorder {
 
             this.source = this.context.createMediaStreamSource(this.stream);
 
-            // Load the worklet processor for PCM conversion
             await this.context.audioWorklet.addModule('/static/js/pcm-recorder-processor.js');
             this.processor = new AudioWorkletNode(this.context, 'pcm-recorder-processor');
 
             this.processor.port.onmessage = (e) => {
                 if (this.isRecording && !this.isMuted && onDataCallback && e.data) {
-                    const float32Data = e.data;
-                    
-                    // Calculate volume level for visualizer
-                    let sumSq = 0;
-                    for (let i = 0; i < float32Data.length; i++) {
-                        sumSq += float32Data[i] * float32Data[i];
-                    }
-                    const volume = Math.sqrt(sumSq / float32Data.length);
-
-                    // Convert Float32Array to Int16Array (PCM 16-bit)
-                    const pcmData = this.float32ToInt16(float32Data);
-                    
-                    // Send raw binary ArrayBuffer and volume
-                    onDataCallback(pcmData.buffer, volume);
+                    // Convert Float32Array to Int16Array then to raw bytes
+                    const pcmInt16 = this.float32ToInt16(e.data);
+                    // Send as raw ArrayBuffer binary — this is what the ADK bidi-demo expects
+                    onDataCallback(pcmInt16.buffer);
                 }
             };
 
             this.source.connect(this.processor);
             this.processor.connect(this.context.destination);
-            
+
             this.isRecording = true;
             return true;
         } catch (error) {
@@ -94,16 +83,6 @@ class AudioRecorder {
             buf[l] = Math.min(1, buffer[l]) * 0x7FFF;
         }
         return buf;
-    }
-
-    arrayBufferToBase64(buffer) {
-        let binary = '';
-        const bytes = new Uint8Array(buffer);
-        const len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return window.btoa(binary);
     }
 }
 

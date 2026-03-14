@@ -1,83 +1,72 @@
 /**
- * audio-player.js
- * Wrapper for Web Audio API to play base64-encoded PCM audio.
- * Adapted from Google ADK bidi-demo.
+ * audio-player.js — Plays back PCM audio received from the Gemini Live agent.
+ * Receives base64-encoded PCM audio chunks and plays them through the speakers.
  */
 
 class AudioPlayer {
     constructor(audioContext) {
         this.context = audioContext;
-        this.processor = null;
+        this.queue = [];
         this.isPlaying = false;
-        this.playbackSpeed = 1.0;
-        this.initPromise = this.initWorklet();
+        this.currentSource = null;
     }
 
-    async initWorklet() {
+    /**
+     * Play a base64-encoded PCM audio chunk from the agent.
+     * The Gemini Live API returns audio as base64 PCM 24kHz mono.
+     */
+    playBase64(base64Data) {
         try {
-            await this.context.audioWorklet.addModule('/static/js/pcm-player-processor.js');
-            this.processor = new AudioWorkletNode(this.context, 'pcm-player-processor');
-            this.processor.connect(this.context.destination);
-            console.log("🔊 Audio player initialized");
-        } catch (e) {
-            console.error("Error initializing audio player worklet:", e);
-        }
-    }
-
-    async playBase64(base64Data) {
-        await this.initPromise; // Wait for initialization if needed
-        
-        if (this.context.state === 'suspended') {
-            await this.context.resume();
-        }
-
-        try {
-            const binaryString = window.atob(base64Data);
-            const len = binaryString.length;
-            const bytes = new Uint8Array(len);
-            for (let i = 0; i < len; i++) {
+            const binaryString = atob(base64Data);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
             }
-            
-            // Expected audio format from gemini native is 24kHz PCM
-            // The Float32 conversion handles playback
-            const float32Data = this.int16ToFloat32(new Int16Array(bytes.buffer));
-            
-            // Adjust speech speed using naive interpolation
-            let finalData = float32Data;
-            if (this.playbackSpeed && this.playbackSpeed !== 1.0) {
-                const speed = this.playbackSpeed;
-                const newLen = Math.floor(float32Data.length / speed);
-                finalData = new Float32Array(newLen);
-                for (let i = 0; i < newLen; i++) {
-                    finalData[i] = float32Data[Math.floor(i * speed)];
-                }
+
+            // Convert PCM Int16 to Float32 for Web Audio
+            const int16 = new Int16Array(bytes.buffer);
+            const float32 = new Float32Array(int16.length);
+            for (let i = 0; i < int16.length; i++) {
+                float32[i] = int16[i] / 32768.0;
             }
-            
-            if (this.processor) {
-                this.processor.port.postMessage(finalData);
-                this.isPlaying = true;
+
+            // The Gemini native audio output is 24kHz
+            const sampleRate = 24000;
+            const audioBuffer = this.context.createBuffer(1, float32.length, sampleRate);
+            audioBuffer.getChannelData(0).set(float32);
+
+            this.queue.push(audioBuffer);
+            if (!this.isPlaying) {
+                this._playNext();
             }
         } catch (e) {
-            console.error("Error playing audio chunk:", e);
+            console.error("Audio playback error:", e);
         }
+    }
+
+    _playNext() {
+        if (this.queue.length === 0) {
+            this.isPlaying = false;
+            return;
+        }
+
+        this.isPlaying = true;
+        const buffer = this.queue.shift();
+        const source = this.context.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.context.destination);
+        source.onended = () => this._playNext();
+        source.start(0);
+        this.currentSource = source;
     }
 
     stop() {
-        if (this.processor) {
-            // Send empty buffer to flush
-            this.processor.port.postMessage(new Float32Array(0));
-            this.isPlaying = false;
+        this.queue = [];
+        this.isPlaying = false;
+        if (this.currentSource) {
+            try { this.currentSource.stop(); } catch (e) {}
+            this.currentSource = null;
         }
-    }
-
-    int16ToFloat32(buffer) {
-        let l = buffer.length;
-        const buf = new Float32Array(l);
-        while (l--) {
-            buf[l] = buffer[l] / 0x7FFF;
-        }
-        return buf;
     }
 }
 

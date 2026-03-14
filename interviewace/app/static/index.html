@@ -1,224 +1,195 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="InterviewAce is an AI-powered real-time interview coach that analyzes your body language and voice delivery to give you live coaching feedback during mock interviews. Built with Google ADK & Gemini Live API.">
     <title>InterviewAce — AI Interview Coach</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <meta name="description"
+        content="Real-time AI-powered interview coaching with voice interaction, video analysis, and live performance scoring.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
+
 <body>
-    <div class="background-container">
-        <!-- Animated gradient background elements -->
-        <div class="glow-orb orb-1"></div>
-        <div class="glow-orb orb-2"></div>
-        <div class="glow-orb orb-3"></div>
-    </div>
+    <!-- Animated Background -->
+    <div class="bg-gradient"></div>
 
-    <div class="app-container">
-        <!-- Header -->
-        <header class="glass-panel main-header">
-            <div class="logo">
-                <span class="icon">🎯</span>
-                <h1>InterviewAce</h1>
-            </div>
-            <div class="status-indicator">
-                <div class="status-dot" id="connectionStatus"></div>
-                <span id="statusText">Connecting...</span>
-            </div>
-        </header>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="logo">
+            <span class="logo-icon">🎯</span>
+            <h1>InterviewAce</h1>
+        </div>
+        <div class="connection-badge">
+            <span id="connectionStatus" class="status-dot disconnected"></span>
+            <span id="statusText">Disconnected</span>
+        </div>
+    </header>
 
-        <!-- Main Content Area -->
-        <main class="content-grid">
-            
-            <!-- Left Column: Media & Chat -->
-            <div class="left-col">
-                <!-- Camera Feed -->
-                <div class="glass-panel media-container">
-                    <div class="camera-wrapper">
-                        <video id="webcam" autoplay playsinline muted></video>
-                        <div class="camera-overlay">
-                            <span class="recording-indicator" id="recordingIndicator">
-                                <span class="dot"></span> Live Analysis
-                            </span>
-                        </div>
-                    </div>
+    <!-- Main Layout -->
+    <main class="app-layout">
+        <!-- Left Column: Video + Coach -->
+        <div class="left-column">
+            <!-- Camera Feed -->
+            <div class="card camera-card">
+                <div class="card-header">
+                    <span>📹 Live Analysis</span>
+                    <span id="recordingBadge" class="badge recording-badge" style="display:none;">● REC</span>
                 </div>
-
-                <!-- Coach Response Area -->
-                <div class="glass-panel coach-panel">
-                    <div class="coach-header">
-                        <h3>💬 Coach Ace</h3>
-                        <div class="voice-visualizer" id="coachVisualizer">
-                            <div class="bar"></div>
-                            <div class="bar"></div>
-                            <div class="bar"></div>
-                            <div class="bar"></div>
-                            <div class="bar"></div>
-                        </div>
-                    </div>
-                    <div class="transcript-area" id="transcriptArea">
-                        <p class="system-msg">Say "Hello" to get started with your practice interview!</p>
-                    </div>
-                    
-                    <!-- Controls & Settings -->
-                    <div class="controls-row">
-                        <!-- Left: Voice & Speed Settings -->
-                        <div class="coach-settings">
-                            <select id="voiceSelect" class="settings-select" title="Change Agent Voice">
-                                <option value="Kore">🎙️ Voice: Kore (Professional)</option>
-                                <option value="Aoede">🎙️ Voice: Aoede (Warm)</option>
-                                <option value="Charon">🎙️ Voice: Charon (Deep)</option>
-                                <option value="Fenrir">🎙️ Voice: Fenrir (Energetic)</option>
-                                <option value="Puck">🎙️ Voice: Puck (Bright)</option>
-                            </select>
-                            
-                            <div class="speed-control" title="Adjust Agent Speech Speed">
-                                <label for="speedSlider">Speed: <span id="speedVal">1.0x</span></label>
-                                <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0">
-                            </div>
-                        </div>
-
-                        <!-- Center: Hardware Controls -->
-                        <div class="controls">
-                            <!-- User Mic Visualizer (appears when speaking) -->
-                            <div class="voice-visualizer user-visualizer" id="userVisualizer" title="Your Microphone Input">
-                                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
-                            </div>
-                            
-                            <button id="sessionBtn" class="control-btn" style="width: auto; padding: 0 1.5rem; font-weight: 600; border-radius: 100px; background: var(--safe); color: white; border-color: var(--safe);" title="Start/Pause Interview">
-                                ▶ Start
-                            </button>
-                            
-                            <button id="micBtn" class="control-btn" title="Toggle Microphone" disabled>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <line x1="1" y1="1" x2="23" y2="23"></line>
-                                    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
-                                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
-                                    <line x1="12" y1="19" x2="12" y2="22"></line>
-                                </svg>
-                            </button>
-                            <button id="cameraBtn" class="control-btn" title="Toggle Camera" disabled>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
-                                    <line x1="1" y1="1" x2="23" y2="23"></line>
-                                </svg>
-                            </button>
-                            <button id="endBtn" class="control-btn danger" title="End Session" disabled>
-                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
-                                    <line x1="12" y1="2" x2="12" y2="12"></line>
-                                </svg>
-                            </button>
-                        </div>
+                <div class="video-container">
+                    <video id="videoPreview" autoplay muted playsinline></video>
+                    <div class="video-overlay" id="videoOverlay">
+                        <span>Camera Off</span>
                     </div>
                 </div>
             </div>
 
-            <!-- Right Column: Live Scoring Dashboard -->
-            <div class="right-col">
-                <div class="glass-panel dashboard-panel">
-                    <h2>📊 Live Performance</h2>
-                    
-                    <div class="score-card main-score">
-                        <div class="score-header">
-                            <span>Overall Score</span>
-                            <span class="trend up" id="trendOverall">↑ 0%</span>
-                        </div>
-                        <div class="score-value" id="scoreOverall">--<span>/100</span></div>
+            <!-- Coach Ace Chat Area -->
+            <div class="card coach-card">
+                <div class="card-header">
+                    <span>🎤 Coach Ace</span>
+                    <div class="voice-indicator" id="coachVisualizer">
+                        <span class="dot"></span><span class="dot"></span>
+                        <span class="dot"></span><span class="dot"></span>
+                        <span class="dot"></span>
                     </div>
+                </div>
+                <div id="transcriptArea" class="transcript-area">
+                    <div class="system-msg">Press <strong>▶ Start</strong> to begin your mock interview.</div>
+                </div>
+            </div>
 
-                    <div class="metrics-list">
-                        <!-- Confidence -->
-                        <div class="metric-item">
-                            <div class="metric-header">
-                                <span>Confidence</span>
-                                <span class="metric-val" id="valConfidence">--%</span>
-                            </div>
-                            <div class="progress-bg">
-                                <div class="progress-fill" id="barConfidence" style="width: 0%"></div>
-                            </div>
-                        </div>
+            <!-- Controls -->
+            <div class="controls-bar">
+                <!-- Voice Selector -->
+                <div class="voice-selector">
+                    <label for="voiceSelect">🎙️</label>
+                    <select id="voiceSelect">
+                        <option value="Kore">Kore (Professional)</option>
+                        <option value="Aoede">Aoede (Warm)</option>
+                        <option value="Charon">Charon (Deep)</option>
+                        <option value="Fenrir">Fenrir (Energetic)</option>
+                        <option value="Puck">Puck (Bright)</option>
+                    </select>
+                </div>
 
-                        <!-- Clarity -->
-                        <div class="metric-item">
-                            <div class="metric-header">
-                                <span>Clarity & Pace</span>
-                                <span class="metric-val" id="valClarity">--%</span>
-                            </div>
-                            <div class="progress-bg">
-                                <div class="progress-fill" id="barClarity" style="width: 0%"></div>
-                            </div>
-                        </div>
+                <!-- Action Buttons -->
+                <button id="startBtn" class="btn btn-start" title="Start Interview">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
+                    <span>Start</span>
+                </button>
+                <button id="micBtn" class="btn btn-icon" title="Mute/Unmute Mic" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <line x1="1" y1="1" x2="23" y2="23"></line>
+                        <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path>
+                        <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path>
+                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                    </svg>
+                </button>
+                <button id="cameraBtn" class="btn btn-icon" title="Toggle Camera" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <path d="M16.5 2.5h-9A2 2 0 0 0 5.5 4.5v15a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-15a2 2 0 0 0-2-2z">
+                        </path>
+                        <circle cx="12" cy="10" r="3"></circle>
+                    </svg>
+                </button>
+                <button id="endBtn" class="btn btn-end" title="End Interview" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="15" y1="9" x2="9" y2="15"></line>
+                        <line x1="9" y1="9" x2="15" y2="15"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
 
-                        <!-- Body Language -->
-                        <div class="metric-item">
-                            <div class="metric-header">
-                                <span>Body Language</span>
-                                <span class="metric-val" id="valBody">--%</span>
-                            </div>
-                            <div class="progress-bg">
-                                <div class="progress-fill" id="barBody" style="width: 0%"></div>
-                            </div>
-                        </div>
+        <!-- Right Column: Dashboard -->
+        <div class="right-column">
+            <!-- Live Performance -->
+            <div class="card dashboard-card">
+                <div class="card-header">
+                    <span>📊 Live Performance</span>
+                    <span id="overallTrend" class="trend-badge">—</span>
+                </div>
 
-                        <!-- Content Quality -->
-                        <div class="metric-item">
-                            <div class="metric-header">
-                                <span>Content (STAR)</span>
-                                <span class="metric-val" id="valContent">--%</span>
-                            </div>
-                            <div class="progress-bg">
-                                <div class="progress-fill" id="barContent" style="width: 0%"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="session-stats">
-                        <div class="stat">
-                            <span class="label">Questions</span>
-                            <span class="val" id="statQuestions">0</span>
-                        </div>
-                        <div class="stat">
-                            <span class="label">Duration</span>
-                            <span class="val" id="statDuration">00:00</span>
-                        </div>
+                <!-- Overall Score -->
+                <div class="overall-score">
+                    <span class="score-label">Overall Score</span>
+                    <div class="score-display">
+                        <span id="overallScore" class="score-value">—</span>
+                        <span class="score-max">/100</span>
                     </div>
                 </div>
 
-                <!-- Latest Feedback Panel -->
-                <div class="glass-panel feedback-panel">
-                    <h3>💡 Latest Feedback</h3>
-                    <div class="feedback-content" id="feedbackContent">
-                        <p class="placeholder-text">Complete an answer to receive detailed coaching feedback here.</p>
-                        
-                        <!-- These will be injected via JS -->
-                        <div class="feedback-section strengths d-none" id="sectionStrengths">
-                            <h4>What you did well</h4>
-                            <p id="textStrengths"></p>
+                <!-- Individual Metrics -->
+                <div class="metrics-grid">
+                    <div class="metric-row">
+                        <span class="metric-name">Confidence</span>
+                        <div class="metric-bar">
+                            <div id="barConfidence" class="metric-fill" style="width:0%"></div>
                         </div>
-                        
-                        <div class="feedback-section improvements d-none" id="sectionImprovements">
-                            <h4>Areas to improve</h4>
-                            <p id="textImprovements"></p>
+                        <span id="valConfidence" class="metric-val">—</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-name">Clarity & Pace</span>
+                        <div class="metric-bar">
+                            <div id="barClarity" class="metric-fill" style="width:0%"></div>
                         </div>
+                        <span id="valClarity" class="metric-val">—</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-name">Body Language</span>
+                        <div class="metric-bar">
+                            <div id="barBody" class="metric-fill" style="width:0%"></div>
+                        </div>
+                        <span id="valBody" class="metric-val">—</span>
+                    </div>
+                    <div class="metric-row">
+                        <span class="metric-name">Content (STAR)</span>
+                        <div class="metric-bar">
+                            <div id="barContent" class="metric-fill" style="width:0%"></div>
+                        </div>
+                        <span id="valContent" class="metric-val">—</span>
+                    </div>
+                </div>
+
+                <!-- Session Stats -->
+                <div class="session-stats">
+                    <div class="stat">
+                        <span class="stat-label">QUESTIONS</span>
+                        <span id="statQuestions" class="stat-value">0</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">DURATION</span>
+                        <span id="statDuration" class="stat-value">00:00</span>
                     </div>
                 </div>
             </div>
 
-        </main>
-    </div>
+            <!-- Feedback Panel (Hidden until interview ends) -->
+            <div id="feedbackPanel" class="card feedback-card" style="display:none;">
+                <div class="card-header">
+                    <span>📋 Session Feedback</span>
+                </div>
+                <div id="feedbackContent" class="feedback-content">
+                    <p>Complete your interview to receive feedback.</p>
+                </div>
+            </div>
+        </div>
+    </main>
 
-    <!-- Audio processing worklets -->
-    <script src="/static/js/pcm-recorder-processor.js" type="module"></script>
-    <script src="/static/js/pcm-player-processor.js" type="module"></script>
-    
-    <!-- Application logic -->
-    <script src="/static/js/audio-player.js"></script>
-    <script src="/static/js/audio-recorder.js"></script>
-    <script src="/static/js/camera.js"></script>
-    <script src="/static/js/dashboard.js"></script>
-    <script src="/static/js/app.js"></script>
+    <!-- Scripts -->
+    <script src="/static/js/audio-player.js?v=2"></script>
+    <script src="/static/js/audio-recorder.js?v=2"></script>
+    <script src="/static/js/camera.js?v=2"></script>
+    <script src="/static/js/dashboard.js?v=2"></script>
+    <script src="/static/js/app.js?v=2"></script>
 </body>
+
 </html>

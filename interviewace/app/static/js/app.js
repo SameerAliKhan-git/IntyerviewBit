@@ -1,353 +1,333 @@
 /**
- * app.js
- * Main application orchestration logic.
- * Handles WebSocket connection to the FastAPI backend, coordinates
- * the camera and audio systems, and updates the UI via Dashboard.
+ * app.js — InterviewAce Main Application Logic
+ * 
+ * Implements the full interview flow:
+ * 1. User clicks Start → WebSocket connects → Agent greets via AUDIO
+ * 2. Agent asks questions via speech, user answers via speech
+ * 3. Agent scores silently (tool calls update dashboard)
+ * 4. User clicks End → Agent gives closing → Feedback panel shown
+ * 
+ * Handles the official ADK event format from event.model_dump_json().
  */
 
-// Generate a random user and session ID for this demo
-const userId = 'user_' + Math.random().toString(36).substr(2, 9);
-const sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
-
-document.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
     console.log("🚀 InterviewAce initializing...");
+
+    const userId = 'user_' + Math.random().toString(36).substr(2, 9);
+    const sessionId = 'session_' + Math.random().toString(36).substr(2, 11);
 
     // ── Controllers ──
     const dashboard = new window.Dashboard();
     const camera = new window.CameraManager();
-    
-    // Audio controllers (from ADK samples)
     let audioRecorder = null;
     let audioPlayer = null;
     let audioContext = null;
+
+    // ── State ──
+    let ws = null;
+    let isInterviewActive = false;
+    let sessionStart = null;
+    let timerInterval = null;
+    let questionsAsked = 0;
+    let allFeedback = [];
 
     // ── UI Elements ──
     const statusDot = document.getElementById('connectionStatus');
     const statusText = document.getElementById('statusText');
     const transcriptArea = document.getElementById('transcriptArea');
     const coachVisualizer = document.getElementById('coachVisualizer');
-    
-    // Buttons
+    const recordingBadge = document.getElementById('recordingBadge');
+    const feedbackPanel = document.getElementById('feedbackPanel');
+    const feedbackContent = document.getElementById('feedbackContent');
+
+    const startBtn = document.getElementById('startBtn');
     const micBtn = document.getElementById('micBtn');
     const cameraBtn = document.getElementById('cameraBtn');
     const endBtn = document.getElementById('endBtn');
-    const sessionBtn = document.getElementById('sessionBtn');
-    
-    let isSessionStarted = false;
-
-    // ── WebSocket ──
-    let ws = null;
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    
-    // ── Settings Elements ──
     const voiceSelect = document.getElementById('voiceSelect');
-    const speedSlider = document.getElementById('speedSlider');
-    const speedVal = document.getElementById('speedVal');
-    const userVisualizer = document.getElementById('userVisualizer');
 
-    /**
-     * Initializes the entire application flow
-     */
-    async function initApp() {
+    // ══════════════════════════════════════════
+    // START INTERVIEW
+    // ══════════════════════════════════════════
+    startBtn.addEventListener('click', async () => {
+        if (isInterviewActive) return;
+        
         try {
-            // 1. Initialize Audio Context (must be done after user interaction in some browsers, 
-            // but we try here first)
+            // Initialize audio context on user gesture (required by browsers)
             audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-            
-            // 2. Initialize ADK Audio Player and Recorder
-            if (window.AudioPlayer) audioPlayer = new window.AudioPlayer(audioContext);
-            if (window.AudioRecorder) audioRecorder = new window.AudioRecorder(audioContext);
-            
-            // 3. Start Camera (Video only)
-            const camSuccess = await camera.start();
-            if (camSuccess) {
-                // Setup frame extraction to send to WebSocket
-                camera.startFrameExtraction((base64Data) => {
-                    sendWsMessage({
-                        type: "image",
-                        mimeType: "image/jpeg",
-                        data: base64Data
-                    });
+            if (audioContext.state === 'suspended') await audioContext.resume();
+
+            audioPlayer = new window.AudioPlayer(audioContext);
+            audioRecorder = new window.AudioRecorder(audioContext);
+
+            // Start camera
+            const camOk = await camera.start();
+            if (camOk) {
+                document.getElementById('videoOverlay').style.display = 'none';
+                camera.startFrameExtraction((b64) => {
+                    sendJson({ type: "image", mimeType: "image/jpeg", data: b64 });
                 });
             }
 
-            // We setup ADK but DO NOT connect WS yet. E.g wait for user to click Start.
-            statusText.textContent = "Ready - Press Start";
+            // Connect WebSocket with selected voice
+            connectWebSocket(voiceSelect.value);
 
-        } catch (error) {
-            console.error("❌ Initialization failed:", error);
-            statusText.textContent = "Error Accessing Hardware";
-            statusDot.className = "status-dot disconnected";
+            // Update UI
+            startBtn.disabled = true;
+            startBtn.innerHTML = '<span>Connecting...</span>';
+            voiceSelect.disabled = true;
+        } catch (e) {
+            console.error("❌ Failed to start:", e);
+            appendTranscript("Failed to initialize. Please allow mic/camera access.", "system");
         }
-    }
+    });
 
-    /**
-     * Establish WebSocket connection
-     */
-    function connectWebSocket() {
-        statusText.textContent = "Connecting...";
+    // ══════════════════════════════════════════
+    // END INTERVIEW
+    // ══════════════════════════════════════════
+    endBtn.addEventListener('click', () => {
+        if (!isInterviewActive) return;
+        // Tell the agent to end and generate report
+        sendJson({ type: "text", text: "I'd like to end the interview now. Please give me my final assessment." });
+        appendTranscript("Ending interview...", "system");
         
-        if (ws) { ws.close(); }
-        
-        const voice = voiceSelect ? voiceSelect.value : "Kore";
-        const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}?voice=${voice}`;
-        
-        ws = new WebSocket(wsUrl);
+        // Wait a moment for the agent to respond, then show feedback
+        setTimeout(() => {
+            showFeedbackPanel();
+            cleanup();
+        }, 8000);
+    });
 
-        ws.onopen = async () => {
-            console.log("✅ WebSocket connected");
-            statusText.textContent = "Connected";
-            statusDot.className = "status-dot connected";
-            
-            // Send initial setup/config if needed
-            sendWsMessage({
-                type: "audio_config",
-                config: { sample_rate: 16000 }
-            });
-
-            // Start Audio Recording (after WS is open so we can send data)
-            if (audioRecorder) {
-                try {
-                    await audioRecorder.start((pcmData, volume) => {
-                        // Send binary PCM chunk over WebSocket
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(pcmData);
-                        }
-                        
-                        // Highly Sensitive Real-time Mic Visualizer
-                        if (userVisualizer && volume !== undefined && !audioRecorder.isMuted) {
-                            requestAnimationFrame(() => {
-                                const bars = userVisualizer.querySelectorAll('.bar');
-                                const noiseFloor = 0.005;
-                                if (volume > noiseFloor) {
-                                    const scaleLog = Math.max(0, (Math.log10(volume) - Math.log10(noiseFloor)) * 15);
-                                    bars.forEach((bar) => {
-                                        const h = Math.max(4, Math.min(22, scaleLog * (0.8 + Math.random() * 0.4)));
-                                        bar.style.height = `${h}px`;
-                                    });
-                                } else {
-                                    bars.forEach(bar => bar.style.height = '4px');
-                                }
-                            });
-                        } else if (userVisualizer) {
-                            const bars = userVisualizer.querySelectorAll('.bar');
-                            bars.forEach(bar => bar.style.height = '4px');
-                        }
-                    });
-                    console.log("🎤 Audio recording started");
-                    if (!audioRecorder.isMuted) {
-                        micBtn.classList.add('active');
-                        micBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
-                    }
-                } catch (e) {
-                    console.error("❌ Failed to start audio recorder:", e);
-                }
-            }
-        };
-
-        ws.onmessage = async (event) => {
-            try {
-                // Determine format
-                if (typeof event.data === 'string') {
-                    // JSON Message
-                    const msg = JSON.parse(event.data);
-                    handleJsonMessage(msg);
-                } else if (event.data instanceof Blob) {
-                    // Binary Message (unlikely in ADK setup, but possible)
-                    console.log("Received Binary WS message");
-                }
-            } catch (error) {
-                console.error("❌ Error parsing WS message:", error);
-            }
-        };
-
-        ws.onclose = () => {
-            console.log("🔌 WebSocket disconnected");
-            statusText.textContent = "Disconnected";
-            statusDot.className = "status-dot disconnected";
-            // Deliberately NOT calling cleanup() here. If the WS drops (e.g. invalid API key), 
-            // we want to keep the local mic and camera running so the user can still 
-            // verify the UI interaction works.
-        };
-
-        ws.onerror = (error) => {
-            console.error("❌ WebSocket error:", error);
-        };
-    }
-
-    /**
-     * Handle incoming JSON messages from the backend
-     */
-    function handleJsonMessage(msg) {
-        switch (msg.type) {
-            case 'audio':
-                // Base64 audio chunk from agent
-                if (msg.data && audioPlayer) {
-                    audioPlayer.playBase64(msg.data);
-                    coachVisualizer.classList.add('active');
-                }
-                break;
-                
-            case 'text':
-                // Text chunk from agent
-                appendTranscript(msg.content, 'coach');
-                break;
-                
-            case 'input_transcription':
-                // Text transcript of what the USER said
-                appendTranscript(msg.content, 'user');
-                break;
-                
-            case 'output_transcription':
-                 // Text transcript of what the AGENT said (alternative to 'text')
-                 // Often useful if using native audio models that don't emit 'text' parts
-                 appendTranscript(msg.content, 'coach');
-                 break;
-                 
-            case 'score_update':
-                // Live dashboard update from tool calls
-                if (msg.data) dashboard.updateScores(msg.data);
-                break;
-                
-            case 'turn_complete':
-                coachVisualizer.classList.remove('active');
-                break;
-                
-            default:
-                console.log("Unknown message type:", msg.type);
-        }
-    }
-
-    /**
-     * Send JSON message to backend
-     */
-    function sendWsMessage(payload) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(payload));
-        }
-    }
-
-    /**
-     * Helper to append messages to the chat transcript area
-     */
-    function appendTranscript(text, role) {
-        if (!text.trim()) return;
-        
-        let lastMsg = transcriptArea.lastElementChild;
-        // If the last message was from the same role, append to it (unless it's been a while)
-        if (lastMsg && lastMsg.classList.contains(role)) {
-            // Check if it's the exact same text (sometimes happens with partial transcripts)
-            if (!lastMsg.textContent.includes(text)) {
-                lastMsg.textContent += ' ' + text;
-            }
-        } else {
-            const el = document.createElement('div');
-            el.className = `msg ${role}`;
-            el.textContent = text;
-            transcriptArea.appendChild(el);
-        }
-        
-        // Auto scroll
-        transcriptArea.scrollTop = transcriptArea.scrollHeight;
-    }
-
-    /**
-     * Full application cleanup
-     */
-    function cleanup() {
-        if (camera) camera.stop();
-        if (audioRecorder) audioRecorder.stop();
-        if (audioPlayer) audioPlayer.stop();
-        if (ws) ws.close();
-    }
-
-    // ── Event Listeners ──
-
+    // ══════════════════════════════════════════
+    // MIC TOGGLE
+    // ══════════════════════════════════════════
     micBtn.addEventListener('click', () => {
         if (!audioRecorder) return;
-        const isEnabled = audioRecorder.toggleMute();
-        micBtn.classList.toggle('active', isEnabled);
-        
-        micBtn.innerHTML = isEnabled 
+        const isActive = audioRecorder.toggleMute();
+        micBtn.classList.toggle('active', isActive);
+        micBtn.innerHTML = isActive
             ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>'
             : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
     });
 
-    sessionBtn.addEventListener('click', () => {
-        if (!isSessionStarted) {
-            // Start
-            connectWebSocket();
-            isSessionStarted = true;
-            sessionBtn.innerHTML = '⏸ Pause';
-            sessionBtn.style.background = '#eab308'; // Warning/yellow color
-            sessionBtn.style.borderColor = '#eab308';
-            micBtn.disabled = false;
-            cameraBtn.disabled = false;
-            endBtn.disabled = false;
-        } else {
-            // Pause
-            if (audioRecorder) audioRecorder.stop();
-            if (camera) camera.stop();
-            if (ws) ws.close();
-            isSessionStarted = false;
-            sessionBtn.innerHTML = '▶ Resume';
-            sessionBtn.style.background = 'var(--safe)';
-            sessionBtn.style.borderColor = 'var(--safe)';
-            statusText.textContent = "Paused";
-            statusDot.className = "status-dot disconnected";
-        }
-    });
-
-    if (voiceSelect) {
-        voiceSelect.addEventListener('change', () => {
-            console.log("🗣️ Voice changed to:", voiceSelect.value);
-            // Reconnect websocket with new voice param
-            connectWebSocket();
-        });
-    }
-
-    if (speedSlider && speedVal) {
-        speedSlider.addEventListener('input', () => {
-            const speed = parseFloat(speedSlider.value);
-            speedVal.textContent = speed.toFixed(1) + 'x';
-            if (audioPlayer) {
-                audioPlayer.playbackSpeed = speed;
-            }
-        });
-    }
-
+    // ══════════════════════════════════════════
+    // CAMERA TOGGLE
+    // ══════════════════════════════════════════
     cameraBtn.addEventListener('click', () => {
-        if (!camera) return;
-        const isEnabled = camera.toggle();
-        cameraBtn.classList.toggle('active', isEnabled);
+        const isOn = camera.toggle();
+        cameraBtn.classList.toggle('active', isOn);
+        document.getElementById('videoOverlay').style.display = isOn ? 'none' : 'flex';
+    });
+
+    // ══════════════════════════════════════════
+    // WEBSOCKET CONNECTION
+    // ══════════════════════════════════════════
+    function connectWebSocket(voiceName) {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}?voice=${voiceName}`;
         
-        // Show/hide indicator based on camera state
-        if (isEnabled && camera.onFrameCaptured) {
-            camera.startFrameExtraction(camera.onFrameCaptured);
+        statusText.textContent = "Connecting...";
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = async () => {
+            console.log("✅ WebSocket connected");
+            statusText.textContent = "Interview Active";
+            statusDot.className = "status-dot connected";
+            isInterviewActive = true;
+
+            // Update UI
+            startBtn.style.display = 'none';
+            micBtn.disabled = false;
+            micBtn.classList.add('active');
+            cameraBtn.disabled = false;
+            cameraBtn.classList.add('active');
+            endBtn.disabled = false;
+            recordingBadge.style.display = 'inline-flex';
+
+            // Start timer
+            sessionStart = Date.now();
+            timerInterval = setInterval(updateTimer, 1000);
+
+            // Clear transcript
+            transcriptArea.innerHTML = '';
+
+            // 🚀 TRIGGER THE AGENT TO SPEAK FIRST 🚀
+            setTimeout(() => {
+                sendJson({ 
+                    type: "text", 
+                    text: "Hello, I am ready to start my mock interview." 
+                });
+            }, 500);
+
+            // Start microphone — send raw binary PCM
+            try {
+                await audioRecorder.start((pcmBytes) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(pcmBytes);
+                    }
+                });
+                console.log("🎤 Microphone streaming started");
+            } catch (e) {
+                console.error("❌ Mic failed:", e);
+            }
+        };
+
+        ws.onmessage = (event) => {
+            if (typeof event.data === 'string') {
+                try {
+                    const adkEvent = JSON.parse(event.data);
+                    handleAdkEvent(adkEvent);
+                } catch (e) {
+                    console.error("Parse error:", e);
+                }
+            }
+        };
+
+        ws.onclose = () => {
+            console.log("🔌 WebSocket closed");
+            if (isInterviewActive) {
+                statusText.textContent = "Disconnected";
+                statusDot.className = "status-dot disconnected";
+            }
+        };
+
+        ws.onerror = (e) => console.error("WS error:", e);
+    }
+
+    // ══════════════════════════════════════════
+    // HANDLE ADK EVENTS (official format)
+    // ══════════════════════════════════════════
+    function handleAdkEvent(evt) {
+        // ── Agent content (text or audio parts) ──
+        if (evt.content && evt.content.parts) {
+            for (const part of evt.content.parts) {
+                // Text response (half-cascade mode or transcription)
+                if (part.text) {
+                    appendTranscript(part.text, 'coach');
+                }
+                // Audio response (native audio mode)
+                if (part.inline_data && part.inline_data.data) {
+                    if (audioPlayer) {
+                        audioPlayer.playBase64(part.inline_data.data);
+                        coachVisualizer.classList.add('speaking');
+                    }
+                }
+            }
+        }
+
+        // ── Transcriptions (native audio model) ──
+        if (evt.server_content) {
+            const sc = evt.server_content;
+            if (sc.input_transcription && sc.input_transcription.trim()) {
+                appendTranscript(sc.input_transcription, 'user');
+            }
+            if (sc.output_transcription && sc.output_transcription.trim()) {
+                appendTranscript(sc.output_transcription, 'coach');
+            }
+        }
+
+        // ── Tool calls (score updates from save_session_feedback) ──
+        if (evt.actions && evt.actions.function_calls) {
+            for (const fc of evt.actions.function_calls) {
+                console.log("🔧 Tool:", fc.name, fc.args);
+                if (fc.name === "save_session_feedback" && fc.args) {
+                    questionsAsked = fc.args.question_number || questionsAsked + 1;
+                    document.getElementById('statQuestions').textContent = questionsAsked;
+
+                    // Update live dashboard scores
+                    dashboard.updateScores({
+                        confidence: fc.args.confidence_score || 0,
+                        clarity: fc.args.clarity_score || 0,
+                        body_language: fc.args.body_language_score || 0,
+                        content: fc.args.content_score || 0,
+                    });
+
+                    // Store feedback for end panel
+                    allFeedback.push({
+                        q: questionsAsked,
+                        strengths: fc.args.strengths || "",
+                        improvements: fc.args.improvements || "",
+                        summary: fc.args.feedback_summary || "",
+                    });
+                }
+
+                if (fc.name === "get_interview_question") {
+                    questionsAsked++;
+                    document.getElementById('statQuestions').textContent = questionsAsked;
+                }
+            }
+        }
+
+        // ── Turn complete ──
+        if (evt.turn_complete) {
+            coachVisualizer.classList.remove('speaking');
+        }
+
+        // ── Interrupted (barge-in: agent stopped because user started talking) ──
+        if (evt.interrupted) {
+            coachVisualizer.classList.remove('speaking');
+            if (audioPlayer) audioPlayer.stop();
+        }
+    }
+
+    // ══════════════════════════════════════════
+    // HELPERS
+    // ══════════════════════════════════════════
+    function sendJson(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(obj));
+        }
+    }
+
+    function appendTranscript(text, role) {
+        if (!text || !text.trim()) return;
+        const el = document.createElement('div');
+        el.className = `msg ${role}`;
+        if (role === 'user') el.innerHTML = `<strong>You:</strong> ${text}`;
+        else if (role === 'coach') el.innerHTML = `<strong>Coach Ace:</strong> ${text}`;
+        else el.innerHTML = `<em>${text}</em>`;
+        transcriptArea.appendChild(el);
+        transcriptArea.scrollTop = transcriptArea.scrollHeight;
+    }
+
+    function updateTimer() {
+        if (!sessionStart) return;
+        const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+        const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const s = String(elapsed % 60).padStart(2, '0');
+        document.getElementById('statDuration').textContent = `${m}:${s}`;
+    }
+
+    function showFeedbackPanel() {
+        feedbackPanel.style.display = 'block';
+        let html = '';
+        if (allFeedback.length === 0) {
+            html = '<p>No detailed feedback available yet.</p>';
         } else {
-            camera.stopFrameExtraction();
+            for (const fb of allFeedback) {
+                html += `<div class="feedback-item">
+                    <h4>Question ${fb.q}</h4>
+                    <p><strong>Strengths:</strong> ${fb.strengths || 'N/A'}</p>
+                    <p><strong>To Improve:</strong> ${fb.improvements || 'N/A'}</p>
+                    ${fb.summary ? `<p>${fb.summary}</p>` : ''}
+                </div>`;
+            }
         }
-    });
+        feedbackContent.innerHTML = html;
+    }
 
-    endBtn.addEventListener('click', () => {
-        if (confirm("Are you sure you want to end this interview session?")) {
-            cleanup();
-            statusText.textContent = "Session Ended";
-            statusDot.className = "status-dot disconnected";
-            
-            // Add final system message
-            const finalMsg = document.createElement('div');
-            finalMsg.className = 'system-msg';
-            finalMsg.textContent = 'Session ended. Review your scores on the dashboard.';
-            transcriptArea.appendChild(finalMsg);
-            
-            // Disable buttons
-            micBtn.disabled = true;
-            cameraBtn.disabled = true;
-            endBtn.disabled = true;
-        }
-    });
-
-    // ── Start Everything ──
-    initApp();
+    function cleanup() {
+        isInterviewActive = false;
+        if (timerInterval) clearInterval(timerInterval);
+        recordingBadge.style.display = 'none';
+        statusText.textContent = "Interview Ended";
+        statusDot.className = "status-dot disconnected";
+        if (audioRecorder) audioRecorder.stop();
+        if (camera) camera.stop();
+        micBtn.disabled = true;
+        cameraBtn.disabled = true;
+        endBtn.disabled = true;
+        // Don't close WS immediately — let agent finish response
+        setTimeout(() => { if (ws) ws.close(); }, 2000);
+    }
 });

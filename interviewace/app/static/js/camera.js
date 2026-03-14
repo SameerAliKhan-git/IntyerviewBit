@@ -5,7 +5,7 @@
 
 class CameraManager {
     constructor() {
-        this.videoElement = document.getElementById('webcam');
+        this.videoElement = document.getElementById('videoPreview');
         this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
         this.stream = null;
@@ -57,7 +57,7 @@ class CameraManager {
         if (this.stream) {
             this.stream.getTracks().forEach(track => track.stop());
             this.stream = null;
-            this.videoElement.srcObject = null;
+            if (this.videoElement) this.videoElement.srcObject = null;
         }
         this.stopFrameExtraction();
     }
@@ -67,17 +67,14 @@ class CameraManager {
         if (!this.stream) return;
         
         this.isRecording = true;
-        document.getElementById('recordingIndicator').style.opacity = '1';
         
         this.frameIntervalId = setInterval(() => {
-            this.captureAndConvertFrame();
+            if (this.isRecording) this.captureAndConvertFrame();
         }, this.frameIntervalMs);
     }
 
     stopFrameExtraction() {
         this.isRecording = false;
-        document.getElementById('recordingIndicator').style.opacity = '0.5'; // Dim instead of hide to show it's present but not processing
-        
         if (this.frameIntervalId) {
             clearInterval(this.frameIntervalId);
             this.frameIntervalId = null;
@@ -85,15 +82,13 @@ class CameraManager {
     }
 
     captureAndConvertFrame() {
-        if (!this.isRecording || !this.videoElement.videoWidth) return;
+        if (!this.videoElement || !this.videoElement.videoWidth) return;
         
         // Draw video frame to canvas
         this.ctx.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
         
         // Convert to base64 JPEG (lower quality to save bandwidth)
         const frameDataUrl = this.canvas.toDataURL('image/jpeg', 0.6);
-        
-        // Remove the data URI prefix (data:image/jpeg;base64,)
         const base64Data = frameDataUrl.split(',')[1];
         
         if (this.onFrameCaptured && base64Data) {
@@ -102,7 +97,7 @@ class CameraManager {
     }
 
     toggle() {
-        if (!this.stream) return;
+        if (!this.stream) return false;
         const videoTrack = this.stream.getVideoTracks()[0];
         if (videoTrack) {
             videoTrack.enabled = !videoTrack.enabled;
