@@ -1,0 +1,27 @@
+[project]
+name = "interviewace"
+version = "1.0.0"
+description = "AI-powered real-time interview coach that sees your body language and hears your voice — built with Google ADK & Gemini Live API"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=0.6.0",
+    "google-cloud-firestore>=2.16.0",
+    "google-cloud-storage>=2.14.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "python-dotenv>=1.0.0",
+    "google-genai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.3.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
