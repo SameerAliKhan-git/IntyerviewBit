@@ -1,6 +1,6 @@
 /**
- * app.js - InterviewAce Google Meet Clone Engine
- * Manages WebSocket, WebRTC, Visualizers, Transcripts (CC), and Multi-Agent UI.
+ * app.js - InterviewAce Google Meet Clone Engine (3-Tier Edition)
+ * All speech and vision only - no text generation fallback.
  */
 
 // -- Google Meet Volume Visualizer --
@@ -9,68 +9,39 @@ class VolumeVisualizer {
         this.analyser = analyserNode;
         this.bufferLength = this.analyser.frequencyBinCount;
         this.dataArray = new Uint8Array(this.bufferLength);
-        
         this.tile = document.getElementById(tileId);
-        
         const ringsContainer = document.getElementById(ringsId);
         this.rings = ringsContainer ? Array.from(ringsContainer.querySelectorAll('.ring')) : [];
-        
         const eqContainer = document.getElementById(equalizerId);
         this.eqBars = eqContainer ? Array.from(eqContainer.querySelectorAll('.bar')) : [];
-        if (eqContainer) this.eqContainer = eqContainer;
-        
-        // Hide mic icon if eq exists
+        this.eqContainer = eqContainer;
         this.micIcon = this.tile ? this.tile.querySelector('.mic-icon') : null;
-        
         this.isAnimating = false;
         this.smoothedVol = 0;
     }
-
-    start() {
-        if (!this.isAnimating) {
-            this.isAnimating = true;
-            this.draw();
-        }
-    }
-
+    start() { if (!this.isAnimating) { this.isAnimating = true; this.draw(); } }
     stop() {
         this.isAnimating = false;
-        
         this.rings.forEach(r => { r.style.transform = 'scale(1)'; r.style.opacity = '0'; });
         this.eqBars.forEach(b => b.style.height = '4px');
-        
         if (this.tile) this.tile.classList.remove('tile-speaking');
         if (this.eqContainer) this.eqContainer.style.display = 'none';
         if (this.micIcon) this.micIcon.style.display = 'inline-block';
     }
-
     draw() {
         if (!this.isAnimating) return;
         requestAnimationFrame(() => this.draw());
-
         this.analyser.getByteFrequencyData(this.dataArray);
-        
-        // Calculate RMS volume
         let sum = 0;
-        for (let i = 0; i < this.bufferLength; i++) {
-            sum += this.dataArray[i];
-        }
-        let avg = sum / this.bufferLength;
-        let vol = avg / 128.0; // roughly 0.0 to 1.5+
-        
-        // Smooth changes
+        for (let i = 0; i < this.bufferLength; i++) sum += this.dataArray[i];
+        const vol = (sum / this.bufferLength) / 128.0;
         this.smoothedVol = this.smoothedVol * 0.7 + vol * 0.3;
-        
-        // Threshold for speaking
         const isSpeaking = this.smoothedVol > 0.05;
 
-        // Tile glow
         if (this.tile) {
             if (isSpeaking) this.tile.classList.add('tile-speaking');
             else this.tile.classList.remove('tile-speaking');
         }
-
-        // Toggle mic icon / equalizer
         if (isSpeaking && this.eqContainer) {
             this.eqContainer.style.display = 'flex';
             if (this.micIcon) this.micIcon.style.display = 'none';
@@ -78,29 +49,17 @@ class VolumeVisualizer {
             if (this.eqContainer) this.eqContainer.style.display = 'none';
             if (this.micIcon) this.micIcon.style.display = 'inline-block';
         }
-
-        // Scale Rings (Avatar halo)
         if (this.rings.length === 3) {
             if (isSpeaking) {
-                const s1 = Math.min(1 + this.smoothedVol * 0.3, 1.4);
-                const s2 = Math.min(1 + this.smoothedVol * 0.6, 1.8);
-                const s3 = Math.min(1 + this.smoothedVol * 1.0, 2.3);
-                
-                this.rings[0].style.transform = `scale(${s1})`;
-                this.rings[1].style.transform = `scale(${s2})`;
-                this.rings[2].style.transform = `scale(${s3})`;
-                
+                this.rings[0].style.transform = `scale(${Math.min(1 + this.smoothedVol * 0.3, 1.4)})`;
+                this.rings[1].style.transform = `scale(${Math.min(1 + this.smoothedVol * 0.6, 1.8)})`;
+                this.rings[2].style.transform = `scale(${Math.min(1 + this.smoothedVol * 1.0, 2.3)})`;
                 this.rings.forEach(r => r.style.opacity = '0.4');
             } else {
-                this.rings.forEach(r => {
-                    r.style.transform = 'scale(1)';
-                    r.style.opacity = '0';
-                });
+                this.rings.forEach(r => { r.style.transform = 'scale(1)'; r.style.opacity = '0'; });
             }
         }
-
-        // Jiggle Equalizer bars
-        if (isSpeaking && this.eqBars.length === 3) {
+        if (isSpeaking && this.eqBars.length >= 3) {
             this.eqBars[0].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
             this.eqBars[1].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 20 * Math.random() + 6))}px`;
             this.eqBars[2].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
@@ -109,78 +68,94 @@ class VolumeVisualizer {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("🚀 InterviewAce Meet Mode initializing...");
+    console.log("InterviewAce - 3-Tier Live Agent loading...");
 
+    // State
     const userId = 'user_' + Math.random().toString(36).substr(2, 9);
     const sessionId = 'session_' + Math.random().toString(36).substr(2, 11);
-
-    // Hardware state
-    const camera = new window.CameraManager();
-    let audioRecorder = null;
-    let audioPlayer = null;
-    let audioContext = null;
-    let userVisualizer = null;
-    let agentVisualizer = null;
-
-    // Conneciton state
     let ws = null;
-    let isInterviewActive = false;
+    let isActive = false;
     let dialogueHistory = [];
     let finalScores = {};
+    let totalFillers = 0;
     let ccTimeout = null;
+    let ccEnabled = true;
+    let sidebarOpen = true;
 
-    // DOM Elements
-    const startBtn = document.getElementById('startBtn');
+    // Hardware
+    const camera = new window.CameraManager();
+    let audioRecorder = null, audioPlayer = null, audioContext = null;
+    let userVis = null, agentVis = null;
+
+    // DOM refs
+    const setupPanel = document.getElementById('setupPanel');
+    const meetingMain = document.getElementById('meetingMain');
+    const bottomBar = document.getElementById('bottomBar');
+    const setupJoinBtn = document.getElementById('setupJoinBtn');
     const endBtn = document.getElementById('endBtn');
     const micBtn = document.getElementById('micBtn');
     const cameraBtn = document.getElementById('cameraBtn');
     const ccBtn = document.getElementById('ccBtn');
-    
-    // Status Elements
+    const analyticsBtn = document.getElementById('analyticsBtn');
     const thinkingOverlay = document.getElementById('thinkingOverlay');
     const transcribingBadge = document.getElementById('transcribingBadge');
     const agentMicIcon = document.getElementById('agentMicIcon');
     const userMicIcon = document.getElementById('userMicIcon');
     const clockTime = document.getElementById('clockTime');
-
-    // Captions Elements
     const ccContainer = document.getElementById('ccContainer');
     const ccAvatar = document.getElementById('ccAvatar');
     const ccName = document.getElementById('ccName');
     const ccText = document.getElementById('ccText');
-    let ccEnabled = true;
+    const sidebar = document.getElementById('analyticsSidebar');
+    const companyBadge = document.getElementById('companyBadge');
+    const meetingCode = document.getElementById('meetingCode');
 
-    // Update real clock
+    // Session config from setup
+    let selectedRole = 'general';
+    let selectedCompany = 'general';
+    let selectedDifficulty = 'medium';
+    let selectedVoice = 'Kore';
+
+    // Clock
     setInterval(() => {
         const d = new Date();
         clockTime.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }, 1000);
 
-    // TOAST NOTIFICATIONS
+    // Toast
     const toastContainer = document.getElementById('toastContainer');
-    function showToast(message) {
-        const toast = document.createElement('div');
-        toast.className = 'toast';
-        toast.textContent = message;
-        toastContainer.appendChild(toast);
-        setTimeout(() => toast.remove(), 3000);
+    function showToast(msg, duration = 3000) {
+        const t = document.createElement('div');
+        t.className = 'toast'; t.textContent = msg;
+        toastContainer.appendChild(t);
+        setTimeout(() => t.remove(), duration);
     }
 
-    // Attach Toast to all interaction buttons
-    document.querySelectorAll('.interaction-btn').forEach(btn => {
+    // Sidebar toggle
+    window.toggleSidebar = function() {
+        sidebarOpen = !sidebarOpen;
+        if (sidebarOpen) sidebar.classList.remove('hidden');
+        else sidebar.classList.add('hidden');
+    };
+    analyticsBtn.addEventListener('click', () => { window.toggleSidebar(); });
+
+    // Toast interaciton buttons
+    document.querySelectorAll('.interaction-btn:not(#analyticsBtn)').forEach(btn => {
         btn.addEventListener('click', () => {
             const action = btn.getAttribute('data-action');
-            if (action) showToast(`"${action}" is disabled during a mock interview.`);
+            if (action) showToast(`"${action}" is unavailable during a mock interview.`);
         });
     });
 
     // ==========================================
-    // EVENT LISTENERS
+    // SETUP & JOIN
     // ==========================================
-    
-    startBtn.addEventListener('click', async () => {
-        if (isInterviewActive) return;
-        
+    setupJoinBtn.addEventListener('click', async () => {
+        selectedRole = document.getElementById('roleSelect').value;
+        selectedCompany = document.getElementById('companySelect').value;
+        selectedDifficulty = document.getElementById('difficultySelect').value;
+        selectedVoice = document.getElementById('voiceSelect').value;
+
         try {
             audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
             if (audioContext.state === 'suspended') await audioContext.resume();
@@ -188,196 +163,180 @@ document.addEventListener('DOMContentLoaded', () => {
             audioPlayer = new window.AudioPlayer(audioContext);
             audioRecorder = new window.AudioRecorder(audioContext);
 
-            // Start hardware
+            // Camera
             const camOk = await camera.start();
             if (camOk) {
                 document.getElementById('videoOverlay').style.display = 'none';
                 cameraBtn.classList.remove('disabled-state');
                 cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
                 camera.startFrameExtraction((b64) => {
-                    sendJson({ type: "image", mimeType: "image/jpeg", data: b64 });
+                    if (ws && ws.readyState === WebSocket.OPEN)
+                        sendJson({ type: "image", mimeType: "image/jpeg", data: b64 });
                 });
             }
 
-            // Visualizers setup (Google Meet Volume Rings)
-            agentVisualizer = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
-            userVisualizer = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
-            agentVisualizer.start();
-            userVisualizer.start();
+            // Visualizers
+            agentVis = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
+            userVis = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
+            agentVis.start(); userVis.start();
 
-            // Connect
-            connectWebSocket('Kore');
+            // Show meeting UI
+            setupPanel.style.display = 'none';
+            meetingMain.style.display = 'flex';
+            bottomBar.style.display = 'flex';
 
-            startBtn.style.display = 'none';
-            endBtn.style.display = 'flex';
+            // Set company badge
+            companyBadge.textContent = selectedCompany === 'general' ? 'General' : selectedCompany.charAt(0).toUpperCase() + selectedCompany.slice(1);
+            meetingCode.textContent = `${selectedCompany}-${selectedDifficulty}-interview`;
+
+            // Connect WebSocket
+            connectWebSocket();
+
         } catch (e) {
-            console.error("❌ Init error:", e);
+            console.error("Init error:", e);
+            showToast("Initialization error: " + e.message);
         }
     });
 
     endBtn.addEventListener('click', () => {
-        if (!isInterviewActive) return;
-        
-        // Clean wrap-up
-        sendJson({ type: "text", text: "I'd like to end the interview now. Please finalize the score." });
+        if (!isActive) return;
+        sendJson({ type: "text", text: "I'd like to end the interview now. Please finalize and generate the session report." });
         thinkingOverlay.style.display = 'block';
-
-        // Wait for final functions, then show Modal
-        setTimeout(() => {
-            cleanup();
-            showFeedbackPanel();
-        }, 4000);
+        setTimeout(() => { cleanup(); showFeedbackPanel(); }, 4500);
     });
 
     micBtn.addEventListener('click', () => {
         if (!audioRecorder) return;
-        const isMuted = !audioRecorder.toggleMute();
-        
-        if (isMuted) {
+        const wasUnmuted = audioRecorder.toggleMute();
+        if (!wasUnmuted) {
             micBtn.classList.add('disabled-state');
             micBtn.innerHTML = '<span class="material-icons">mic_off</span>';
             userMicIcon.textContent = 'mic_off';
-            userMicIcon.classList.add('red-icon');
             showToast("Microphone muted");
         } else {
             micBtn.classList.remove('disabled-state');
             micBtn.innerHTML = '<span class="material-icons">mic</span>';
             userMicIcon.textContent = 'mic';
-            userMicIcon.classList.remove('red-icon');
-            showToast("Microphone turned on");
+            showToast("Microphone on");
         }
     });
 
     cameraBtn.addEventListener('click', () => {
-        const isOn = camera.toggle();
-        if (isOn) {
+        const on = camera.toggle();
+        if (on) {
             cameraBtn.classList.remove('disabled-state');
             cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
             document.getElementById('videoOverlay').style.display = 'none';
-            showToast("Camera turned on");
+            showToast("Camera on");
         } else {
             cameraBtn.classList.add('disabled-state');
             cameraBtn.innerHTML = '<span class="material-icons">videocam_off</span>';
             document.getElementById('videoOverlay').style.display = 'flex';
-            showToast("Camera turned off");
+            showToast("Camera off");
         }
     });
 
     ccBtn.addEventListener('click', () => {
         ccEnabled = !ccEnabled;
-        if (ccEnabled) {
-            ccBtn.classList.add('active');
-            showToast("Captions turned on");
-        } else {
-            ccBtn.classList.remove('active');
-            ccContainer.style.display = 'none';
-            showToast("Captions turned off");
-        }
+        ccBtn.classList.toggle('active', ccEnabled);
+        if (!ccEnabled) ccContainer.style.display = 'none';
+        showToast(ccEnabled ? "Captions on" : "Captions off");
     });
 
     // ==========================================
-    // WEBSOCKET LOGIC
+    // WEBSOCKET
     // ==========================================
-    function connectWebSocket(voiceName) {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}?voice=${voiceName}`;
+    function connectWebSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${location.host}/ws/${userId}/${sessionId}?voice=${selectedVoice}`;
         ws = new WebSocket(wsUrl);
 
         ws.onopen = async () => {
-            isInterviewActive = true;
+            isActive = true;
             thinkingOverlay.style.display = 'block';
-            
-            // Enable buttons
             ccBtn.disabled = false;
-            ccBtn.classList.add('active'); // Default ON
-
-            // Setup mic defaults
+            ccBtn.classList.add('active');
             micBtn.classList.remove('disabled-state');
             micBtn.innerHTML = '<span class="material-icons">mic</span>';
             userMicIcon.textContent = 'mic';
-            userMicIcon.classList.remove('red-icon');
 
-            // Trigger Agent
+            // Send greeting trigger immediately
             setTimeout(() => {
                 sendJson({ type: "text", text: "Hello, I have joined the meet." });
-            }, 500);
+            }, 600);
 
+            // Start streaming mic audio
             try {
-                await audioRecorder.start((pcmBytes) => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(pcmBytes);
-                    }
+                await audioRecorder.start((pcmBuf) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcmBuf);
                 });
-            } catch (e) {}
+            } catch (e) { console.error("Mic error:", e); }
         };
 
         ws.onmessage = (event) => {
             if (typeof event.data === 'string') {
-                try {
-                    const adkEvent = JSON.parse(event.data);
-                    handleAdkEvent(adkEvent);
-                } catch (e) {
-                    console.error("Parse error:", e);
-                }
+                try { handleAdkEvent(JSON.parse(event.data)); } catch(e) {}
             }
         };
 
-        ws.onclose = () => { isInterviewActive = false; };
+        ws.onclose = () => { isActive = false; };
+        ws.onerror = (e) => console.error("WS error:", e);
     }
 
     // ==========================================
-    // EVENT HANDLING & MULTI-AGENT SIM
+    // ADK EVENT HANDLER
     // ==========================================
     function handleAdkEvent(evt) {
-        // Agent speaking
+        // Find tools and audio inside parts
         if (evt.content && evt.content.parts) {
             thinkingOverlay.style.display = 'none';
             agentMicIcon.textContent = 'mic';
             agentMicIcon.classList.remove('red-icon');
 
             for (const part of evt.content.parts) {
+                // Spoken text fragment
                 if (part.text) dialogueHistory.push(`[Coach Ace]: ${part.text}`);
-                if (part.inline_data && part.inline_data.data) {
-                    if (audioPlayer) audioPlayer.playBase64(part.inline_data.data);
-                }
-            }
-        }
-
-        // Transcriptions / CC (Elena - Notetaker actions)
-        if (evt.server_content) {
-            const sc = evt.server_content;
-            
-            if (sc.input_transcription && sc.input_transcription.trim()) {
-                dialogueHistory.push(`[You]: ${sc.input_transcription}`);
-                thinkingOverlay.style.display = 'block';
-                showCaption('You', 'Y', 'bg-green', sc.input_transcription);
-                pulseNotetaker();
-            }
-            if (sc.output_transcription && sc.output_transcription.trim()) {
-                showCaption('Coach Ace', 'C', 'bg-blue', sc.output_transcription);
-                pulseNotetaker();
-            }
-        }
-
-        // Tool execution
-        if (evt.actions && evt.actions.function_calls) {
-            for (const fc of evt.actions.function_calls) {
-                pulseNotetaker(); // Simulate Elena typing out the scores silently
                 
-                if (fc.name === "save_session_feedback" && fc.args) {
-                    finalScores = {
-                        confidence: fc.args.confidence_score || finalScores.confidence,
-                        clarity: fc.args.clarity_score || finalScores.clarity,
-                        body_language: fc.args.body_language_score || finalScores.body_language,
-                        content: fc.args.content_score || finalScores.content,
-                        strengths: fc.args.strengths || finalScores.strengths,
-                        improvements: fc.args.improvements || finalScores.improvements,
-                    };
+                // Audio data
+                const inlineData = part.inlineData || part.inline_data;
+                if (inlineData && inlineData.data) {
+                    if (audioPlayer) audioPlayer.playBase64(inlineData.data);
+                }
+
+                // Tool Call Request (Agent wants to use a tool)
+                let fc = part.functionCall || part.function_call;
+                if (fc) processFunctionCall(fc);
+
+                // Tool Call Response (Runner finished executing the tool locally)
+                let fr = part.functionResponse || part.function_response;
+                if (fr) {
+                    // Normalize the response object format if ADK nests it in {result: string}
+                    if (fr.response && fr.response.result && typeof fr.response.result === 'string') {
+                        fr.response = JSON.parse(fr.response.result);
+                    }
+                    processToolResult(fr);
                 }
             }
         }
 
-        if (evt.turn_complete || evt.interrupted) {
+        // Transcriptions (CC + History)
+        const inTrans = evt.inputTranscription || evt.input_transcription;
+        if (inTrans && inTrans.text && inTrans.text.trim()) {
+            const userText = inTrans.text.trim();
+            dialogueHistory.push(`[You]: ${userText}`);
+            thinkingOverlay.style.display = 'block';
+            showCC('You', 'Y', 'bg-green', userText);
+            pulseElena();
+        }
+
+        const outTrans = evt.outputTranscription || evt.output_transcription;
+        if (outTrans && outTrans.text && outTrans.text.trim()) {
+            showCC('Coach Ace', 'C', 'bg-blue', outTrans.text.trim());
+            pulseElena();
+        }
+
+        // Turn completion tracking
+        if (evt.turnComplete || evt.turn_complete || evt.interrupted) {
             agentMicIcon.textContent = 'mic_off';
             agentMicIcon.classList.add('red-icon');
             thinkingOverlay.style.display = 'none';
@@ -385,68 +344,159 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function processFunctionCall(fc) {
+        pulseElena();
+        console.log("Tool call:", fc.name, fc.args);
+    }
+
+    function processToolResult(fr) {
+        if (!fr || !fr.response) return;
+        const data = typeof fr.response === 'string' ? JSON.parse(fr.response) : fr.response;
+        const name = fr.name;
+
+        if (name === 'save_session_feedback') {
+            updateMetric('mConfidence', 'bConfidence', data.confidence);
+            updateMetric('mClarity', 'bClarity', data.clarity);
+            updateMetric('mBody', 'bBody', data.body_language);
+            updateMetric('mStar', 'bStar', data.star_score);
+            finalScores = { ...finalScores, ...data };
+        }
+
+        if (name === 'detect_filler_words') {
+            totalFillers += (data.total_filler_words || 0);
+            document.getElementById('fillerCount').textContent = totalFillers;
+            const words = data.detected_fillers ? Object.keys(data.detected_fillers).join(', ') : '—';
+            document.getElementById('fillerWords').textContent = words || '—';
+            document.getElementById('fillerTip').textContent = data.coaching_tip || '';
+        }
+
+        if (name === 'analyze_body_language') {
+            updateBodyIndicator('dotEye', 'lblEye', data.eye_contact);
+            updateBodyIndicator('dotPosture', 'lblPosture', data.posture);
+            updateBodyIndicator('dotExpression', 'lblExpression', data.expression);
+        }
+
+        if (name === 'evaluate_star_method') {
+            const comps = data.components_present || {};
+            setStarBadge('sSituation', comps.situation);
+            setStarBadge('sTask', comps.task);
+            setStarBadge('sAction', comps.action);
+            setStarBadge('sResult', comps.result);
+        }
+
+        if (name === 'generate_session_report') {
+            finalScores = { ...finalScores, ...data };
+        }
+    }
+
     // ==========================================
     // UI HELPERS
     // ==========================================
     function sendJson(obj) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(obj));
-        }
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
     }
 
-    function pulseNotetaker() {
+    function pulseElena() {
         transcribingBadge.style.display = 'flex';
         clearTimeout(ccTimeout);
-        ccTimeout = setTimeout(() => {
-            transcribingBadge.style.display = 'none';
-        }, 3000);
+        ccTimeout = setTimeout(() => transcribingBadge.style.display = 'none', 3000);
     }
 
-    function showCaption(name, initial, colorClass, text) {
+    function showCC(name, initial, colorClass, text) {
         if (!ccEnabled) return;
         ccContainer.style.display = 'flex';
         ccName.textContent = name;
         ccText.textContent = text;
-        
         ccAvatar.className = `cc-avatar ${colorClass}`;
         ccAvatar.textContent = initial;
-
         clearTimeout(ccTimeout);
-        ccTimeout = setTimeout(() => {
-            ccContainer.style.display = 'none';
-        }, 6000);
+        ccTimeout = setTimeout(() => ccContainer.style.display = 'none', 6000);
+    }
+
+    function updateMetric(valId, barId, value) {
+        if (value === undefined || value === null) return;
+        document.getElementById(valId).textContent = value;
+        const bar = document.getElementById(barId);
+        if (bar) bar.style.width = `${value}%`;
+    }
+
+    function updateBodyIndicator(dotId, lblId, rating) {
+        if (!rating) return;
+        const dot = document.getElementById(dotId);
+        const lbl = document.getElementById(lblId);
+        lbl.textContent = rating;
+        dot.className = 'bi-dot ' + (['excellent', 'good', 'confident', 'natural', 'engaged'].includes(rating) ? 'good' : 'bad');
+    }
+
+    function setStarBadge(id, isPresent) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const badge = el.querySelector('.si-badge');
+        if (badge) {
+            badge.className = `si-badge ${isPresent ? 'on' : 'off'}`;
+        }
     }
 
     function showFeedbackPanel() {
-        document.getElementById('feedbackPanel').style.display = 'flex';
-        
-        const ovr = Math.round(((finalScores.confidence||0) + (finalScores.clarity||0) + (finalScores.body_language||0) + (finalScores.content||0)) / 4) || 0;
-        
-        document.getElementById('scoreOverall').textContent = `${ovr}`;
+        const panel = document.getElementById('feedbackPanel');
+        panel.style.display = 'flex';
+
+        const scores = [
+            finalScores.confidence || 0,
+            finalScores.clarity || 0,
+            finalScores.body_language || 0,
+            finalScores.content || 0,
+            finalScores.star_score || 0,
+        ];
+        const ovr = finalScores.average_score || (scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : 0);
+
+        document.getElementById('scoreOverall').textContent = ovr;
         document.getElementById('scoreConfidence').textContent = finalScores.confidence || 0;
         document.getElementById('scoreClarity').textContent = finalScores.clarity || 0;
         document.getElementById('scoreContent').textContent = finalScores.content || 0;
+        document.getElementById('scoreStar').textContent = finalScores.star_score || 0;
         document.getElementById('scoreBody').textContent = finalScores.body_language || 0;
-        
-        let html = `<p><strong>Elena's Summary Notes:</strong></p><br>`;
-        html += `<p><strong>Key Strengths:</strong><br>${finalScores.strengths || 'No data recorded yet.'}</p><br>`;
-        html += `<p><strong>Areas for Improvement:</strong><br>${finalScores.improvements || 'Keep practicing!'}</p>`;
-        
-        document.getElementById('feedbackContent').innerHTML = html;
 
-        // Enable download button
+        const tier = finalScores.performance_tier || (
+            ovr >= 85 ? 'Excellent - Interview Ready' :
+            ovr >= 70 ? 'Good - Minor Refinements Needed' :
+            ovr >= 55 ? 'Developing - Focused Practice Recommended' :
+            'Building Foundation - Keep Practicing'
+        );
+        document.getElementById('tierBadge').innerHTML = `<span class="tier-pill">${tier}</span>`;
+
+        let html = '';
+        if (finalScores.strengths) html += `<p><strong>Strengths:</strong> ${finalScores.strengths}</p><br>`;
+        if (finalScores.improvements) html += `<p><strong>Growth Areas:</strong> ${finalScores.improvements}</p><br>`;
+        if (totalFillers > 0) html += `<p><strong>Filler Words:</strong> ${totalFillers} total detected. ${totalFillers > 10 ? 'Practice pausing instead of filling.' : 'Good control overall.'}</p><br>`;
+        if (finalScores.recommendations) {
+            html += `<p><strong>Recommendations:</strong></p><ul style="margin-top:8px;padding-left:20px;">`;
+            for (const r of finalScores.recommendations) html += `<li>${r}</li>`;
+            html += `</ul>`;
+        }
+        document.getElementById('feedbackContent').innerHTML = html || '<p>Your interview data is ready. Download the transcript for a full breakdown.</p>';
+
         const dlBtn = document.getElementById('downloadTranscriptBtn');
         dlBtn.disabled = false;
         dlBtn.onclick = downloadTranscript;
     }
 
     function downloadTranscript() {
-        const textContent = "TECHNICAL MOCK INTERVIEW TRANSCRIPT\nTranscribed by: Elena (AI Notetaker)\n\n" + dialogueHistory.join("\n\n");
-        const blob = new Blob([textContent], { type: 'text/plain' });
+        const lines = [
+            `INTERVIEWACE MOCK INTERVIEW TRANSCRIPT`,
+            `Date: ${new Date().toLocaleDateString()}`,
+            `Company Style: ${selectedCompany}  |  Role: ${selectedRole}  |  Difficulty: ${selectedDifficulty}`,
+            `Overall Score: ${finalScores.average_score || document.getElementById('scoreOverall').textContent}`,
+            `Filler Words Detected: ${totalFillers}`,
+            ``,
+            `=== DIALOGUE ===`,
+            ...dialogueHistory,
+        ];
+        const blob = new Blob([lines.join('\n\n')], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `Interview_Transcript_${new Date().toISOString().split('T')[0]}.txt`;
+        a.download = `InterviewAce_Transcript_${new Date().toISOString().split('T')[0]}.txt`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -454,11 +504,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function cleanup() {
-        isInterviewActive = false;
+        isActive = false;
         if (audioRecorder) audioRecorder.stop();
         if (audioPlayer) audioPlayer.stop();
-        if (agentVisualizer) agentVisualizer.stop();
-        if (userVisualizer) userVisualizer.stop();
+        if (agentVis) agentVis.stop();
+        if (userVis) userVis.stop();
         if (camera) camera.stop();
         setTimeout(() => { if (ws) ws.close(); }, 1000);
     }

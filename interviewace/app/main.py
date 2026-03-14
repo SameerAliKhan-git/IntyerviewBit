@@ -222,10 +222,10 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", 8080))
-    print("=" * 60)
-    print("  🎯 InterviewAce — AI Interview Coach")
+    print("="*60)
+    print("  InterviewAce - AI Interview Coach")
     print("  Built with Google ADK & Gemini Live API")
-    print("=" * 60)
+    print("="*60)
     print(f"  Agent: {root_agent.name}")
     print(f"  Model: {root_agent.model}")
     print("=" * 60)

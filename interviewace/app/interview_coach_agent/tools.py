@@ -1,8 +1,8 @@
 """
-InterviewAce — Custom tools for the Coach Ace agent.
-These tools connect to Firestore for grounding data, session persistence,
-and interview question retrieval. They prevent hallucinations by grounding
-the agent in factual data (a specific judging criterion).
+InterviewAce - All Tool Definitions (3 Tiers).
+Tier 1: Body Language AI, Emotion Detection, STAR Coach, Filler Word Detector
+Tier 2: Company-specific mode, Resume analysis, Voice confidence
+Tier 3: Session history, Difficulty scaling, Persona selection
 """
 
 import os
@@ -10,102 +10,132 @@ import json
 import random
 from datetime import datetime, timezone
 
-# Use in-memory fallbacks when Firestore is not available (local dev)
-_firestore_client = None
-_storage_client = None
 _USE_FIRESTORE = os.getenv("USE_FIRESTORE", "false").lower() == "true"
-_USE_CLOUD_STORAGE = os.getenv("USE_CLOUD_STORAGE", "false").lower() == "true"
-_GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "interviewace-recordings")
-
+_firestore_client = None
 
 def _get_firestore():
-    """Lazy-init Firestore client."""
     global _firestore_client
     if _firestore_client is None and _USE_FIRESTORE:
         try:
             from google.cloud import firestore
             _firestore_client = firestore.Client()
         except Exception as e:
-            print(f"[WARN] Firestore not available: {e}. Using in-memory fallback.")
+            print(f"[WARN] Firestore not available: {e}")
     return _firestore_client
 
-
-def _get_storage_bucket():
-    """Lazy-init Cloud Storage bucket."""
-    global _storage_client
-    if _storage_client is None and _USE_CLOUD_STORAGE:
-        try:
-            from google.cloud import storage
-            client = storage.Client()
-            _storage_client = client.bucket(_GCS_BUCKET_NAME)
-        except Exception as e:
-            print(f"[WARN] Cloud Storage not available: {e}. Using in-memory fallback.")
-    return _storage_client
-
-
-# ─────────────────────────────────────────────
-# In-memory fallback data (for local development)
-# ─────────────────────────────────────────────
 from .grounding_data import INTERVIEW_QUESTIONS, GROUNDING_KNOWLEDGE, IMPROVEMENT_TIPS
 
-# Session storage (in-memory fallback)
+# In-memory session store
 _sessions: dict = {}
-# Recording metadata (in-memory fallback)
 _recordings: dict = {}
 
+# ─────────────────────────────────────────────────────
+# TIER 1: CORE INTERVIEW TOOLS
+# ─────────────────────────────────────────────────────
 
-def get_interview_question(role: str, difficulty: str = "medium", category: str = "behavioral") -> dict:
-    """Fetches a relevant interview question based on the candidate's target role, 
-    desired difficulty level, and question category. Uses Firestore for grounding 
-    data when available, with in-memory fallback for local development.
-    
+def get_interview_question(
+    role: str,
+    difficulty: str = "medium",
+    category: str = "behavioral",
+    company_style: str = "general",
+) -> dict:
+    """Fetches a relevant interview question based on the candidate's target role,
+    difficulty level, question category, and company interview style.
+
     Args:
-        role: The job role (e.g., 'software_engineer', 'product_manager', 'data_scientist', 'general')
-        difficulty: The difficulty level ('easy', 'medium', 'hard')
-        category: Question category ('behavioral', 'situational', 'technical')
-    
+        role: The job role e.g. 'software_engineer', 'product_manager', 'data_scientist', 'general'
+        difficulty: 'easy', 'medium', or 'hard'
+        category: 'behavioral', 'situational', 'technical', or 'leadership'
+        company_style: Interview style e.g. 'google', 'amazon', 'meta', 'apple', 'general'
+
     Returns:
-        A dictionary with the question text and evaluation criteria for the coach to use.
+        A dictionary with the question text, evaluation criteria, and coaching tips.
     """
-    db = _get_firestore()
-    
-    if db:
-        try:
-            questions = (
-                db.collection("interview_questions")
-                .where("role", "in", [role, "general"])
-                .where("difficulty", "==", difficulty)
-                .where("category", "==", category)
-                .get()
-            )
-            if questions:
-                q = random.choice(questions).to_dict()
-                return {
-                    "question": q["text"],
-                    "evaluation_criteria": q["evaluation_criteria"],
-                    "role": role,
-                    "difficulty": difficulty,
-                }
-        except Exception as e:
-            print(f"[WARN] Firestore query failed: {e}")
-    
-    # In-memory fallback
+    # Company-specific question sets (Tier 2)
+    company_questions = {
+        "amazon": [
+            {"text": "Tell me about a time you had to work with limited resources to deliver a project.",
+             "evaluation_criteria": "STAR structure, ownership, resourcefulness", "difficulty": "medium",
+             "category": "behavioral", "role": "general", "lp": "Frugality"},
+            {"text": "Describe a situation where you disagreed with your manager and how you handled it.",
+             "evaluation_criteria": "conflict resolution, backbone vs. respect", "difficulty": "medium",
+             "category": "behavioral", "role": "general", "lp": "Have Backbone; Disagree and Commit"},
+            {"text": "Tell me about a time you delivered a project with a very tight deadline.",
+             "evaluation_criteria": "prioritization, delivery, trade-offs", "difficulty": "hard",
+             "category": "behavioral", "role": "general", "lp": "Deliver Results"},
+            {"text": "Describe how you have used data to make a critical decision.",
+             "evaluation_criteria": "analytical thinking, data-driven mindset", "difficulty": "hard",
+             "category": "technical", "role": "general", "lp": "Are Right, A Lot"},
+        ],
+        "google": [
+            {"text": "Tell me about your most technically challenging project.",
+             "evaluation_criteria": "technical depth, impact, scale", "difficulty": "hard",
+             "category": "technical", "role": "software_engineer"},
+            {"text": "How do you approach a problem you have never seen before?",
+             "evaluation_criteria": "structured thinking, first principles", "difficulty": "medium",
+             "category": "behavioral", "role": "general"},
+            {"text": "Describe a time when you improved a process significantly.",
+             "evaluation_criteria": "initiative, measurable impact, collaboration", "difficulty": "medium",
+             "category": "behavioral", "role": "general"},
+            {"text": "Tell me about a time you influenced without authority.",
+             "evaluation_criteria": "leadership, communication, persuasion", "difficulty": "hard",
+             "category": "leadership", "role": "general"},
+        ],
+        "meta": [
+            {"text": "Tell me about a project where you had to move fast and make trade-offs.",
+             "evaluation_criteria": "speed vs. quality trade-offs, pragmatism", "difficulty": "medium",
+             "category": "behavioral", "role": "general"},
+            {"text": "How have you contributed to building team culture?",
+             "evaluation_criteria": "culture add, collaboration, communication", "difficulty": "medium",
+             "category": "behavioral", "role": "general"},
+            {"text": "Describe a time you shipped something imperfect but critical to learn fast.",
+             "evaluation_criteria": "bias for action, learning from failure", "difficulty": "hard",
+             "category": "behavioral", "role": "general"},
+        ],
+        "apple": [
+            {"text": "How do you obsess over the details in your work?",
+             "evaluation_criteria": "attention to quality, standard of excellence", "difficulty": "medium",
+             "category": "behavioral", "role": "general"},
+            {"text": "Tell me about a product decision you championed that others doubted.",
+             "evaluation_criteria": "conviction, user empathy, courage", "difficulty": "hard",
+             "category": "leadership", "role": "general"},
+            {"text": "How do you balance innovation and reliability in your work?",
+             "evaluation_criteria": "engineering excellence, user trust", "difficulty": "hard",
+             "category": "technical", "role": "general"},
+        ],
+    }
+
+    # Try company-specific first
+    if company_style and company_style in company_questions:
+        pool = company_questions[company_style]
+        matching = [q for q in pool if q.get("difficulty") == difficulty]
+        if matching:
+            q = random.choice(matching)
+            return {
+                "question": q["text"],
+                "evaluation_criteria": q["evaluation_criteria"],
+                "role": role, "difficulty": difficulty,
+                "company_style": company_style,
+                "leadership_principle": q.get("lp", ""),
+                "hint": f"This is a {company_style.upper()} style question. Look for: {q['evaluation_criteria']}"
+            }
+
+    # Fall back to general question bank
     matching = [
         q for q in INTERVIEW_QUESTIONS
         if (q["role"] == role or q["role"] == "general")
         and q["difficulty"] == difficulty
         and q["category"] == category
     ]
-    
     if not matching:
         matching = [q for q in INTERVIEW_QUESTIONS if q["role"] == "general"]
-    
+
     q = random.choice(matching)
     return {
         "question": q["text"],
         "evaluation_criteria": q["evaluation_criteria"],
-        "role": role,
-        "difficulty": difficulty,
+        "role": role, "difficulty": difficulty,
+        "company_style": company_style,
     }
 
 
@@ -116,74 +146,62 @@ def save_session_feedback(
     clarity_score: int,
     body_language_score: int,
     content_score: int,
+    star_score: int,
+    filler_word_count: int,
     feedback_summary: str,
     strengths: str,
     improvements: str,
 ) -> dict:
-    """Saves the coaching feedback and performance scores after each interview answer 
-    to Firestore for analytics and session continuity. This enables tracking improvement 
-    across multiple answers and sessions.
-    
+    """Saves comprehensive coaching feedback and performance scores after each answer.
+
     Args:
-        session_id: Unique session identifier for the current interview practice session
-        question_number: Which question this is (1, 2, 3, etc.)
-        confidence_score: Score from 0 to 100 measuring voice confidence and delivery
-        clarity_score: Score from 0 to 100 measuring answer clarity and structure
-        body_language_score: Score from 0 to 100 measuring posture, eye contact, gestures
-        content_score: Score from 0 to 100 measuring answer quality and STAR method usage
-        feedback_summary: Brief summary of the coaching feedback given
+        session_id: Unique session identifier
+        question_number: Which question this is (1, 2, 3...)
+        confidence_score: 0-100, voice confidence and assertiveness
+        clarity_score: 0-100, answer clarity and articulation
+        body_language_score: 0-100, posture, eye contact, and presence from camera
+        content_score: 0-100, answer quality and relevance
+        star_score: 0-100, how well the STAR method was followed (Situation, Task, Action, Result)
+        filler_word_count: Number of filler words detected (um, uh, like, etc.)
+        feedback_summary: Brief coaching note
         strengths: What the candidate did well
-        improvements: What the candidate should work on
-    
+        improvements: Specific improvement advice
+
     Returns:
-        Confirmation with overall score and trend analysis.
+        Confirmation with overall score and performance trend.
     """
     overall = round(
-        (confidence_score * 0.25 + clarity_score * 0.25 +
-         body_language_score * 0.25 + content_score * 0.25)
+        confidence_score * 0.20 + clarity_score * 0.20 +
+        body_language_score * 0.15 + content_score * 0.25 + star_score * 0.20
     )
-    
-    feedback_entry = {
+
+    entry = {
         "question_number": question_number,
         "confidence": confidence_score,
         "clarity": clarity_score,
         "body_language": body_language_score,
         "content": content_score,
+        "star_score": star_score,
+        "filler_word_count": filler_word_count,
         "overall": overall,
         "feedback": feedback_summary,
         "strengths": strengths,
         "improvements": improvements,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    
-    db = _get_firestore()
-    if db:
-        try:
-            from google.cloud import firestore as fs
-            db.collection("sessions").document(session_id).collection("feedback").add(
-                {**feedback_entry, "timestamp": fs.SERVER_TIMESTAMP}
-            )
-        except Exception as e:
-            print(f"[WARN] Firestore save failed: {e}")
-    
-    # Always store in memory too
+
     if session_id not in _sessions:
         _sessions[session_id] = []
-    _sessions[session_id].append(feedback_entry)
-    
-    # Calculate trend
+    _sessions[session_id].append(entry)
+
     history = _sessions[session_id]
     trend = "first_answer"
     if len(history) > 1:
-        prev_overall = history[-2]["overall"]
-        diff = overall - prev_overall
-        if diff > 0:
-            trend = f"improved_by_{diff}_points"
-        elif diff < 0:
-            trend = f"decreased_by_{abs(diff)}_points"
-        else:
-            trend = "same_as_previous"
-    
+        diff = overall - history[-2]["overall"]
+        trend = f"improved_by_{diff}_points" if diff > 0 else (
+            f"decreased_by_{abs(diff)}_points" if diff < 0 else "same_as_previous"
+        )
+
     return {
         "status": "saved",
         "question_number": question_number,
@@ -192,122 +210,308 @@ def save_session_feedback(
         "clarity": clarity_score,
         "body_language": body_language_score,
         "content": content_score,
+        "star_score": star_score,
+        "filler_word_count": filler_word_count,
         "trend": trend,
         "total_questions_answered": len(history),
     }
 
 
-def get_improvement_tips(weak_area: str) -> dict:
-    """Fetches specific, actionable improvement tips for a weak area identified 
-    during the interview coaching session. Tips are grounded in established 
-    interview coaching research and best practices.
-    
+# ─────────────────────────────────────────────────────
+# TIER 1: FILLER WORD DETECTOR
+# ─────────────────────────────────────────────────────
+
+def detect_filler_words(
+    session_id: str,
+    transcribed_text: str,
+    question_number: int,
+) -> dict:
+    """Analyzes the candidate's speech for filler words and speech patterns.
+    Call this after EVERY answer to track overuse of filler language.
+
     Args:
-        weak_area: The area needing improvement. One of: 'eye_contact', 'filler_words', 
-                   'posture', 'pace', 'confidence', 'content_quality'
-    
+        session_id: Unique session identifier
+        transcribed_text: What the candidate said (from your observation of their speech)
+        question_number: Which question this was for
+
     Returns:
-        Targeted tips and exercises for the specific weak area.
+        Filler word analysis with count, list of detected fillers, and coaching tip.
     """
-    db = _get_firestore()
-    
-    if db:
-        try:
-            doc = db.collection("improvement_tips").document(weak_area).get()
-            if doc.exists:
-                return doc.to_dict()
-        except Exception as e:
-            print(f"[WARN] Firestore query failed: {e}")
-    
-    # In-memory fallback
-    if weak_area in IMPROVEMENT_TIPS:
-        return IMPROVEMENT_TIPS[weak_area]
-    
+    fillers = ["um", "uh", "like", "you know", "basically", "literally",
+               "right", "so yeah", "kind of", "sort of", "i mean", "actually"]
+
+    text_lower = transcribed_text.lower()
+    detected = {}
+
+    for filler in fillers:
+        count = text_lower.count(f" {filler} ") + text_lower.count(f" {filler},")
+        if text_lower.startswith(f"{filler} "):
+            count += 1
+        if count > 0:
+            detected[filler] = count
+
+    total_count = sum(detected.values())
+    word_count = len(transcribed_text.split())
+    filler_rate = round((total_count / max(word_count, 1)) * 100, 1)
+
+    if total_count == 0:
+        rating = "excellent"
+        tip = "No filler words detected. Excellent speech clarity!"
+    elif total_count <= 2:
+        rating = "good"
+        tip = "Very few filler words. Minor awareness needed."
+    elif total_count <= 5:
+        rating = "average"
+        tip = f"Watch out for: {', '.join(detected.keys())}. Try pausing silently instead of filling."
+    else:
+        rating = "needs_improvement"
+        tip = f"High filler word usage ({total_count} detected). Practice deliberate pausing."
+
+    # Store cumulative
+    key = f"{session_id}_fillers"
+    if key not in _sessions:
+        _sessions[key] = []
+    _sessions[key].append({"q": question_number, "count": total_count, "detected": detected})
+
     return {
-        "area": weak_area,
-        "tips": [
-            f"Focus on improving your {weak_area.replace('_', ' ')} through deliberate practice.",
-            "Record yourself and review the playback to build self-awareness.",
-            "Practice with a friend or family member for real-time feedback."
-        ],
-        "exercises": [
-            "Set a specific goal for this area and track progress over 5 practice sessions."
-        ]
+        "total_filler_words": total_count,
+        "detected_fillers": detected,
+        "filler_rate_percent": filler_rate,
+        "rating": rating,
+        "coaching_tip": tip,
+        "question_number": question_number,
     }
 
 
-def fetch_grounding_data(topic: str) -> dict:
-    """Fetches factual grounding data to ensure coaching advice is based on 
-    established frameworks and best practices. This prevents hallucinations 
-    by providing the agent with verified information about interview techniques.
-    
+# ─────────────────────────────────────────────────────
+# TIER 1: BODY LANGUAGE ANALYZER (FROM CAMERA)
+# ─────────────────────────────────────────────────────
+
+def analyze_body_language(
+    session_id: str,
+    question_number: int,
+    eye_contact_rating: str,
+    posture_rating: str,
+    expression_rating: str,
+    gesture_rating: str,
+    notes: str = "",
+) -> dict:
+    """Records body language analysis from camera observations.
+    Call this every 2-3 questions to track non-verbal communication.
+
     Args:
-        topic: The grounding topic to retrieve. One of: 'star_method', 
-               'body_language_tips', 'voice_delivery_tips', 'common_mistakes'
-    
+        session_id: Unique session identifier
+        question_number: Which question number this observation is for
+        eye_contact_rating: 'excellent', 'good', 'poor' - how well they maintain eye contact with the camera
+        posture_rating: 'excellent', 'good', 'poor' - sitting up straight, shoulders back
+        expression_rating: 'confident', 'neutral', 'nervous', 'engaged' - primary facial expression
+        gesture_rating: 'natural', 'excessive', 'absent' - hand and head gestures
+        notes: Any specific observations from the camera
+
     Returns:
-        Factual grounding data from the verified knowledge base.
+        Body language score and coaching notes.
     """
-    db = _get_firestore()
-    
-    if db:
-        try:
-            doc = db.collection("grounding_knowledge").document(topic).get()
-            if doc.exists:
-                return doc.to_dict()
-        except Exception as e:
-            print(f"[WARN] Firestore query failed: {e}")
-    
-    # In-memory fallback
-    if topic in GROUNDING_KNOWLEDGE:
-        return GROUNDING_KNOWLEDGE[topic]
-    
-    return {
-        "title": topic.replace("_", " ").title(),
-        "info": "Use established interview frameworks and focus on specific, observable behaviors."
+    score_map = {"excellent": 95, "good": 75, "poor": 40}
+    expression_map = {"confident": 90, "engaged": 85, "neutral": 70, "nervous": 45}
+    gesture_map = {"natural": 90, "absent": 65, "excessive": 55}
+
+    eye_score = score_map.get(eye_contact_rating, 70)
+    posture_score = score_map.get(posture_rating, 70)
+    expression_score = expression_map.get(expression_rating, 70)
+    gesture_score = gesture_map.get(gesture_rating, 70)
+
+    overall = round((eye_score * 0.35 + posture_score * 0.30 +
+                     expression_score * 0.25 + gesture_score * 0.10))
+
+    entry = {
+        "question_number": question_number,
+        "eye_contact": eye_contact_rating,
+        "posture": posture_rating,
+        "expression": expression_rating,
+        "gestures": gesture_rating,
+        "overall": overall,
+        "notes": notes,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
+    key = f"{session_id}_body"
+    if key not in _sessions:
+        _sessions[key] = []
+    _sessions[key].append(entry)
+
+    return {
+        "body_language_score": overall,
+        "eye_contact": eye_contact_rating,
+        "posture": posture_rating,
+        "expression": expression_rating,
+        "gestures": gesture_rating,
+        "status": "recorded",
+    }
+
+
+# ─────────────────────────────────────────────────────
+# TIER 2: VOICE CONFIDENCE ANALYZER
+# ─────────────────────────────────────────────────────
+
+def analyze_voice_confidence(
+    session_id: str,
+    question_number: int,
+    pace_rating: str,
+    volume_rating: str,
+    clarity_rating: str,
+    pausing_rating: str,
+) -> dict:
+    """Analyzes voice delivery confidence separately from content quality.
+    Call after each answer to build a comprehensive voice profile.
+
+    Args:
+        session_id: Session identifier
+        question_number: Which question
+        pace_rating: 'too_fast', 'good', 'too_slow'
+        volume_rating: 'strong', 'good', 'weak'
+        clarity_rating: 'very_clear', 'clear', 'mumbled'
+        pausing_rating: 'strategic', 'good', 'none', 'excessive'
+
+    Returns:
+        Voice confidence score and coaching guidance.
+    """
+    pace_map = {"good": 90, "too_slow": 60, "too_fast": 55}
+    volume_map = {"strong": 95, "good": 80, "weak": 45}
+    clarity_map = {"very_clear": 95, "clear": 80, "mumbled": 40}
+    pause_map = {"strategic": 95, "good": 80, "none": 55, "excessive": 50}
+
+    scores = [
+        pace_map.get(pace_rating, 75),
+        volume_map.get(volume_rating, 75),
+        clarity_map.get(clarity_rating, 75),
+        pause_map.get(pausing_rating, 75),
+    ]
+    overall = round(sum(scores) / len(scores))
+
+    tips = []
+    if pace_rating == "too_fast":
+        tips.append("Slow down — take a breath between sentences.")
+    if pace_rating == "too_slow":
+        tips.append("Increase your speaking pace to maintain energy.")
+    if volume_rating == "weak":
+        tips.append("Project your voice with more confidence.")
+    if clarity_rating == "mumbled":
+        tips.append("Open your mouth wider and enunciate each word.")
+    if pausing_rating == "none":
+        tips.append("Use deliberate pauses — they signal confidence, not weakness.")
+
+    key = f"{session_id}_voice"
+    if key not in _sessions:
+        _sessions[key] = []
+    _sessions[key].append({
+        "question_number": question_number,
+        "pace": pace_rating, "volume": volume_rating,
+        "clarity": clarity_rating, "pausing": pausing_rating,
+        "overall": overall,
+    })
+
+    return {
+        "voice_confidence_score": overall,
+        "pace": pace_rating,
+        "volume": volume_rating,
+        "clarity": clarity_rating,
+        "pausing": pausing_rating,
+        "coaching_tips": tips,
+        "status": "recorded",
+    }
+
+
+# ─────────────────────────────────────────────────────
+# TIER 2: STAR METHOD COACH
+# ─────────────────────────────────────────────────────
+
+def evaluate_star_method(
+    session_id: str,
+    question_number: int,
+    had_situation: bool,
+    had_task: bool,
+    had_action: bool,
+    had_result: bool,
+    result_was_quantified: bool,
+) -> dict:
+    """Evaluates whether the candidate's answer followed the STAR method structure.
+    Call after each behavioral/situational answer.
+
+    Args:
+        session_id: Session identifier
+        question_number: Which question was answered
+        had_situation: Did they describe the Situation/context?
+        had_task: Did they explain their Task/role?
+        had_action: Did they describe their specific Actions?
+        had_result: Did they share the Result/outcome?
+        result_was_quantified: Did they use numbers/metrics in their result?
+
+    Returns:
+        STAR score and specific guidance on which components were missing.
+    """
+    components = [had_situation, had_task, had_action, had_result]
+    base_score = sum(25 for c in components if c)
+    if result_was_quantified:
+        base_score = min(100, base_score + 10)
+
+    missing = []
+    if not had_situation:
+        missing.append("Situation (context/background)")
+    if not had_task:
+        missing.append("Task (your specific role)")
+    if not had_action:
+        missing.append("Action (what YOU did step-by-step)")
+    if not had_result:
+        missing.append("Result (measurable outcome)")
+
+    key = f"{session_id}_star"
+    if key not in _sessions:
+        _sessions[key] = []
+    _sessions[key].append({
+        "question_number": question_number,
+        "score": base_score,
+        "quantified": result_was_quantified,
+        "missing": missing,
+    })
+
+    return {
+        "star_score": base_score,
+        "components_present": {
+            "situation": had_situation, "task": had_task,
+            "action": had_action, "result": had_result,
+        },
+        "result_quantified": result_was_quantified,
+        "missing_components": missing,
+        "coaching_note": (
+            "Strong STAR structure!" if not missing else
+            f"Missing: {', '.join(missing)}. Always include all four parts."
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────
+# TIER 3: SESSION HISTORY & REPORTING
+# ─────────────────────────────────────────────────────
 
 def get_session_history(session_id: str) -> dict:
-    """Retrieves the complete performance history for a session, enabling 
-    the coach to track improvement trends and provide context-aware feedback.
-    
+    """Retrieves complete performance history for the current session.
+
     Args:
-        session_id: The unique session identifier to retrieve history for
-    
+        session_id: The unique session identifier
+
     Returns:
-        Session history with all scores, feedback, and calculated trends.
+        Full history with scores, trends, and analysis.
     """
-    db = _get_firestore()
-    
-    if db:
-        try:
-            docs = (
-                db.collection("sessions")
-                .document(session_id)
-                .collection("feedback")
-                .order_by("timestamp")
-                .get()
-            )
-            if docs:
-                history = [doc.to_dict() for doc in docs]
-                scores = [h.get("overall", 0) for h in history]
-                return {
-                    "total_questions": len(history),
-                    "scores": scores,
-                    "average_score": round(sum(scores) / len(scores)),
-                    "best_score": max(scores),
-                    "latest_score": scores[-1],
-                    "improvement": scores[-1] - scores[0] if len(scores) > 1 else 0,
-                    "history": history,
-                }
-        except Exception as e:
-            print(f"[WARN] Firestore query failed: {e}")
-    
-    # In-memory fallback
     if session_id in _sessions and _sessions[session_id]:
         history = _sessions[session_id]
         scores = [h["overall"] for h in history]
+        filler_data = _sessions.get(f"{session_id}_fillers", [])
+        body_data = _sessions.get(f"{session_id}_body", [])
+        voice_data = _sessions.get(f"{session_id}_voice", [])
+        star_data = _sessions.get(f"{session_id}_star", [])
+
+        total_fillers = sum(f.get("count", 0) for f in filler_data)
+
         return {
             "total_questions": len(history),
             "scores": scores,
@@ -315,14 +519,82 @@ def get_session_history(session_id: str) -> dict:
             "best_score": max(scores),
             "latest_score": scores[-1],
             "improvement": scores[-1] - scores[0] if len(scores) > 1 else 0,
+            "total_filler_words": total_fillers,
+            "body_language_observations": len(body_data),
+            "star_analyses": len(star_data),
             "history": history,
         }
-    
+
     return {
-        "total_questions": 0,
-        "scores": [],
-        "average_score": 0,
-        "message": "No history yet — let's get started!"
+        "total_questions": 0, "scores": [], "average_score": 0,
+        "message": "No history yet. Let's begin the interview!"
+    }
+
+
+def get_improvement_tips(weak_area: str) -> dict:
+    """Fetches targeted improvement tips for a specific weak area.
+
+    Args:
+        weak_area: One of 'eye_contact', 'filler_words', 'posture', 'pace',
+                   'confidence', 'content_quality', 'star_method'
+
+    Returns:
+        Targeted coaching tips and exercises.
+    """
+    tips_extra = {
+        "star_method": {
+            "area": "STAR method structure",
+            "tips": [
+                "Always start with 'In my role at [Company], I was faced with...' to set Situation.",
+                "Explicitly state your personal Task: 'My responsibility was...'",
+                "Use 'I specifically did...' to make Actions concrete and personal.",
+                "End EVERY answer with a quantified result: 'This resulted in X% improvement.'",
+            ],
+            "exercises": [
+                "Write out 5 stories in STAR format before your interview.",
+                "Record yourself answering and verify all 4 parts are present.",
+            ]
+        },
+        "filler_words": {
+            "area": "Filler Word Reduction",
+            "tips": [
+                "Replace 'um/uh' with a silent pause — it sounds MORE confident, not less.",
+                "If you forget what to say, say 'Let me think about that for a moment' instead.",
+                "Slow your speaking pace — fillers often come from speaking too fast.",
+            ],
+            "exercises": [
+                "Record 2 mins of yourself speaking. Count your fillers. Aim to reduce by 50% each session.",
+                "Read books aloud for 10 minutes per day to build verbal fluency.",
+            ]
+        }
+    }
+
+    if weak_area in tips_extra:
+        return tips_extra[weak_area]
+    if weak_area in IMPROVEMENT_TIPS:
+        return IMPROVEMENT_TIPS[weak_area]
+
+    return {
+        "area": weak_area,
+        "tips": [f"Focus on deliberate practice in {weak_area.replace('_', ' ')}."],
+        "exercises": ["Set a specific goal and track progress over 5 sessions."]
+    }
+
+
+def fetch_grounding_data(topic: str) -> dict:
+    """Fetches verified interview coaching knowledge to prevent hallucinations.
+
+    Args:
+        topic: One of 'star_method', 'body_language_tips', 'voice_delivery_tips', 'common_mistakes'
+
+    Returns:
+        Factual grounding data from the verified knowledge base.
+    """
+    if topic in GROUNDING_KNOWLEDGE:
+        return GROUNDING_KNOWLEDGE[topic]
+    return {
+        "title": topic.replace("_", " ").title(),
+        "info": "Use established interview frameworks and focus on specific, observable behaviors."
     }
 
 
@@ -332,76 +604,45 @@ def save_session_recording(
     duration_seconds: int = 0,
     notes: str = "",
 ) -> dict:
-    """Records metadata about a practice session recording and saves it to
-    Cloud Storage for later review. This enables candidates to replay their
-    sessions and track improvement over time.
+    """Records metadata about a practice session for later review.
 
     Args:
-        session_id: Unique session identifier for this recording
+        session_id: Unique session identifier
         recording_type: Type of recording ('audio', 'video', 'full_session')
-        duration_seconds: Total duration of the recorded session in seconds
-        notes: Optional notes or summary about the recording content
+        duration_seconds: Total session duration
+        notes: Session notes/summary
 
     Returns:
-        Confirmation with storage location and session summary.
+        Confirmation and storage details.
     """
     timestamp = datetime.now(timezone.utc).isoformat()
     recording_id = f"{session_id}_{recording_type}_{timestamp.replace(':', '-')}"
-
-    recording_meta = {
+    meta = {
         "recording_id": recording_id,
         "session_id": session_id,
         "recording_type": recording_type,
         "duration_seconds": duration_seconds,
         "notes": notes,
         "timestamp": timestamp,
+        "gcs_path": "local_fallback",
     }
-
-    bucket = _get_storage_bucket()
-    storage_path = f"recordings/{session_id}/{recording_id}.json"
-
-    if bucket:
-        try:
-            import json as _json
-            blob = bucket.blob(storage_path)
-            blob.upload_from_string(
-                _json.dumps(recording_meta),
-                content_type="application/json",
-            )
-            recording_meta["gcs_path"] = f"gs://{_GCS_BUCKET_NAME}/{storage_path}"
-        except Exception as e:
-            print(f"[WARN] Cloud Storage save failed: {e}")
-            recording_meta["gcs_path"] = "local_fallback"
-    else:
-        recording_meta["gcs_path"] = "local_fallback"
-
-    # Always store in memory too
     if session_id not in _recordings:
         _recordings[session_id] = []
-    _recordings[session_id].append(recording_meta)
-
-    return {
-        "status": "saved",
-        "recording_id": recording_id,
-        "storage_path": recording_meta["gcs_path"],
-        "duration_seconds": duration_seconds,
-        "total_recordings": len(_recordings.get(session_id, [])),
-    }
+    _recordings[session_id].append(meta)
+    return {"status": "saved", "recording_id": recording_id, "total_recordings": len(_recordings.get(session_id, []))}
 
 
 def generate_session_report(session_id: str) -> dict:
-    """Generates a comprehensive end-of-session report summarizing the
-    candidate's overall performance, score trends, strengths, and areas
-    for improvement. Call this when the candidate ends their session.
+    """Generates a comprehensive end-of-session performance report.
+    Call this when the candidate wants to end the interview.
 
     Args:
-        session_id: The unique session identifier to generate a report for
+        session_id: The unique session identifier
 
     Returns:
-        A comprehensive session report with overall assessment and actionable next steps.
+        Full performance report with all metrics across all 3 tiers.
     """
     history_data = get_session_history(session_id)
-
     if history_data.get("total_questions", 0) == 0:
         return {
             "report": "No questions were answered in this session.",
@@ -413,28 +654,31 @@ def generate_session_report(session_id: str) -> dict:
     avg_score = history_data.get("average_score", 0)
     best_score = history_data.get("best_score", 0)
     improvement = history_data.get("improvement", 0)
+    total_fillers = history_data.get("total_filler_words", 0)
 
-    # Identify strongest and weakest areas across all answers
-    area_totals = {"confidence": 0, "clarity": 0, "body_language": 0, "content": 0}
+    # Area averages
+    areas = {"confidence": 0, "clarity": 0, "body_language": 0, "content": 0, "star_score": 0}
     for entry in history:
-        area_totals["confidence"] += entry.get("confidence", 0)
-        area_totals["clarity"] += entry.get("clarity", 0)
-        area_totals["body_language"] += entry.get("body_language", 0)
-        area_totals["content"] += entry.get("content", 0)
+        for k in areas:
+            areas[k] += entry.get(k, 0)
+    area_avgs = {k: round(v / total_q) for k, v in areas.items()}
 
-    area_averages = {k: round(v / total_q) for k, v in area_totals.items()}
-    strongest = max(area_averages, key=lambda k: area_averages[k])
-    weakest = min(area_averages, key=lambda k: area_averages[k])
+    strongest = max(area_avgs, key=lambda k: area_avgs[k])
+    weakest = min(area_avgs, key=lambda k: area_avgs[k])
 
-    # Build performance tier
-    if avg_score >= 85:
-        tier = "Excellent — Interview Ready"
-    elif avg_score >= 70:
-        tier = "Good — Minor Refinements Needed"
-    elif avg_score >= 55:
-        tier = "Developing — Focused Practice Recommended"
-    else:
-        tier = "Building Foundation — Regular Practice Essential"
+    tier = (
+        "Excellent — Interview Ready" if avg_score >= 85 else
+        "Good — Minor Refinements Needed" if avg_score >= 70 else
+        "Developing — Focused Practice Recommended" if avg_score >= 55 else
+        "Building Foundation — Regular Practice Essential"
+    )
+
+    filler_rating = (
+        "Excellent" if total_fillers == 0 else
+        "Good" if total_fillers <= 5 else
+        "Average" if total_fillers <= 15 else
+        "Needs Work"
+    )
 
     return {
         "session_id": session_id,
@@ -443,13 +687,17 @@ def generate_session_report(session_id: str) -> dict:
         "best_score": best_score,
         "score_improvement": improvement,
         "performance_tier": tier,
-        "area_averages": area_averages,
+        "area_averages": area_avgs,
         "strongest_area": strongest.replace("_", " ").title(),
         "weakest_area": weakest.replace("_", " ").title(),
+        "filler_word_summary": {
+            "total": total_fillers,
+            "rating": filler_rating,
+        },
         "recommendations": [
-            f"Focus extra practice on {weakest.replace('_', ' ')} — your current average is {area_averages[weakest]}%",
-            f"Your {strongest.replace('_', ' ')} is strong at {area_averages[strongest]}% — maintain this!",
-            "Try to answer 3-5 more questions targeting your weak areas",
-            "Record yourself and review the playback to build self-awareness",
+            f"Focus on: {weakest.replace('_', ' ').title()} — currently {area_avgs[weakest]}%",
+            f"Your strongest skill: {strongest.replace('_', ' ').title()} at {area_avgs[strongest]}%",
+            f"Filler words: {total_fillers} total — {filler_rating}",
+            "Practice 3-5 more sessions to reach interview-ready level.",
         ],
     }

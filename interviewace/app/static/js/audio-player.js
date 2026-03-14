@@ -1,78 +1,82 @@
 /**
  * audio-player.js — Plays back PCM audio received from the Gemini Live agent.
- * Exposes AnalyserNode for visualization.
+ * Exposes AnalyserNode for visualization and uses AudioWorklet for flawless playback.
  */
 
 class AudioPlayer {
     constructor(audioContext) {
         this.context = audioContext;
-        this.queue = [];
         this.isPlaying = false;
-        this.currentSource = null;
+        this.processor = null;
         
-        // Add analyser for visualizer
+        // Custom Google Meet Visualizer Analyser
         this.analyser = this.context.createAnalyser();
         this.analyser.fftSize = 256;
-        this.analyser.connect(this.context.destination);
+
+        this.initPromise = this.initWorklet();
+    }
+
+    async initWorklet() {
+        try {
+            await this.context.audioWorklet.addModule('/static/js/pcm-player-processor.js');
+            this.processor = new window.AudioWorkletNode(this.context, 'pcm-player-processor');
+            
+            // Connect Worklet -> Analyser -> Speakers
+            this.processor.connect(this.analyser);
+            this.analyser.connect(this.context.destination);
+            
+            console.log("🔊 3-Tier Audio Worklet initialized properly");
+        } catch (e) {
+            console.error("Error initializing audio player worklet:", e);
+        }
     }
 
     getAnalyser() {
         return this.analyser;
     }
 
-    playBase64(base64Data) {
+    async playBase64(base64Data) {
+        await this.initPromise; 
+        
+        if (this.context.state === 'suspended') {
+            await this.context.resume();
+        }
+
         try {
-            const binaryString = atob(base64Data);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
+            const binaryString = window.atob(base64Data);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
                 bytes[i] = binaryString.charCodeAt(i);
             }
-
-            const int16 = new Int16Array(bytes.buffer);
-            const float32 = new Float32Array(int16.length);
-            for (let i = 0; i < int16.length; i++) {
-                float32[i] = int16[i] / 32768.0;
-            }
-
-            const sampleRate = 24000;
-            const audioBuffer = this.context.createBuffer(1, float32.length, sampleRate);
-            audioBuffer.getChannelData(0).set(float32);
-
-            this.queue.push(audioBuffer);
-            if (!this.isPlaying) {
-                this._playNext();
+            
+            // Expected audio format from gemini native is 24kHz PCM
+            const float32Data = this.int16ToFloat32(new Int16Array(bytes.buffer));
+            
+            if (this.processor) {
+                this.processor.port.postMessage(float32Data);
+                this.isPlaying = true;
             }
         } catch (e) {
-            console.error("Audio playback error:", e);
+            console.error("Error playing audio chunk:", e);
         }
-    }
-
-    _playNext() {
-        if (this.queue.length === 0) {
-            this.isPlaying = false;
-            return;
-        }
-
-        this.isPlaying = true;
-        const buffer = this.queue.shift();
-        const source = this.context.createBufferSource();
-        source.buffer = buffer;
-        
-        // Connect source to analyser (which is connected to destination)
-        source.connect(this.analyser);
-        
-        source.onended = () => this._playNext();
-        source.start(0);
-        this.currentSource = source;
     }
 
     stop() {
-        this.queue = [];
-        this.isPlaying = false;
-        if (this.currentSource) {
-            try { this.currentSource.stop(); } catch (e) {}
-            this.currentSource = null;
+        if (this.processor) {
+            // Send empty buffer to flush/kill current audio chunk
+            this.processor.port.postMessage(new Float32Array(0));
+            this.isPlaying = false;
         }
+    }
+
+    int16ToFloat32(buffer) {
+        let l = buffer.length;
+        const buf = new Float32Array(l);
+        while (l--) {
+            buf[l] = buffer[l] / 0x7FFF;
+        }
+        return buf;
     }
 }
 
