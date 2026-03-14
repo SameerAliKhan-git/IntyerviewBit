@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -29,7 +29,8 @@ from fastapi.responses import FileResponse
 from google.adk.agents.llm_agent import Agent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.streaming import LiveRequestQueue
+from google.adk.agents.live_request_queue import LiveRequestQueue
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.genai import types
 
 from interview_coach_agent.agent import root_agent
@@ -119,10 +120,10 @@ async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str)
     # ── Configure RunConfig based on model ──
     model_name = root_agent.model or ""
     
-    if "native-audio" in model_name:
+    if "flash" in model_name:
         # Native Audio Model — full audio bidi streaming
-        run_config = types.RunConfig(
-            streaming_mode=types.StreamingMode.BIDI,
+        run_config = RunConfig(
+            streaming_mode=StreamingMode.BIDI,
             response_modalities=["AUDIO"],
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
@@ -140,8 +141,8 @@ async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str)
         print("  🎙️  Mode: Native Audio (full bidi streaming)")
     else:
         # Half-cascade model — text-based responses
-        run_config = types.RunConfig(
-            streaming_mode=types.StreamingMode.BIDI,
+        run_config = RunConfig(
+            streaming_mode=StreamingMode.BIDI,
             response_modalities=["TEXT"],
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=None,

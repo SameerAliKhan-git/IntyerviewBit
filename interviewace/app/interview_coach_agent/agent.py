@@ -18,7 +18,7 @@ from .tools import (
 # The root_agent is the required export for ADK
 root_agent = Agent(
     name="interview_ace",
-    model=os.getenv("AGENT_MODEL", "gemini-2.5-flash-preview-native-audio-dialog"),
+    model=os.getenv("AGENT_MODEL", "gemini-2.0-flash"),
     description=AGENT_DESCRIPTION,
     instruction=COACH_ACE_INSTRUCTION,
     tools=[
