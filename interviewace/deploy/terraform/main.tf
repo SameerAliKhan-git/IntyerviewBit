@@ -21,6 +21,11 @@ resource "google_cloud_run_v2_service" "interviewace" {
   ingress  = "INGRESS_TRAFFIC_ALL"
 
   template {
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 5
+    }
+
     containers {
       image = "gcr.io/${var.project_id}/interviewace:latest"
       
@@ -32,6 +37,16 @@ resource "google_cloud_run_v2_service" "interviewace" {
       env {
         name  = "USE_FIRESTORE"
         value = "true"
+      }
+
+      env {
+        name  = "USE_CLOUD_STORAGE"
+        value = "true"
+      }
+
+      env {
+        name  = "GCS_BUCKET_NAME"
+        value = google_storage_bucket.recordings.name
       }
 
       ports {
@@ -56,4 +71,22 @@ resource "google_firestore_database" "database" {
   name        = "(default)"
   location_id = var.region
   type        = "FIRESTORE_NATIVE"
+}
+
+# Cloud Storage Bucket for session recordings
+resource "google_storage_bucket" "recordings" {
+  name     = "${var.project_id}-interviewace-recordings"
+  location = var.region
+
+  uniform_bucket_level_access = true
+  force_destroy               = true
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age = 90 # Auto-delete recordings after 90 days
+    }
+  }
 }

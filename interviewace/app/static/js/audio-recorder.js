@@ -39,13 +39,10 @@ class AudioRecorder {
             this.processor.port.onmessage = (e) => {
                 if (this.isRecording && !this.isMuted && onDataCallback && e.data) {
                     // e.data is a Float32Array containing PCM data
-                    // Convert Float32Array to Int16Array
+                    // Convert Float32Array to Int16Array (PCM 16-bit)
                     const pcmData = this.float32ToInt16(e.data);
-                    // Convert Int16Array to base64
-                    const base64Data = this.arrayBufferToBase64(pcmData.buffer);
-                    
-                    // Send JSON payload expected by backend
-                    onDataCallback(JSON.stringify({ bytes: base64Data }));
+                    // Send raw binary ArrayBuffer — backend expects binary WS frames
+                    onDataCallback(pcmData.buffer);
                 }
             };
 

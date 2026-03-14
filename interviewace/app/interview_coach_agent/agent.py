@@ -13,6 +13,8 @@ from .tools import (
     get_improvement_tips,
     fetch_grounding_data,
     get_session_history,
+    save_session_recording,
+    generate_session_report,
 )
 
 # The root_agent is the required export for ADK
@@ -27,5 +29,7 @@ root_agent = Agent(
         get_improvement_tips,
         fetch_grounding_data,
         get_session_history,
+        save_session_recording,
+        generate_session_report,
     ],
 )

@@ -12,7 +12,10 @@ from datetime import datetime, timezone
 
 # Use in-memory fallbacks when Firestore is not available (local dev)
 _firestore_client = None
+_storage_client = None
 _USE_FIRESTORE = os.getenv("USE_FIRESTORE", "false").lower() == "true"
+_USE_CLOUD_STORAGE = os.getenv("USE_CLOUD_STORAGE", "false").lower() == "true"
+_GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "interviewace-recordings")
 
 
 def _get_firestore():
@@ -27,6 +30,19 @@ def _get_firestore():
     return _firestore_client
 
 
+def _get_storage_bucket():
+    """Lazy-init Cloud Storage bucket."""
+    global _storage_client
+    if _storage_client is None and _USE_CLOUD_STORAGE:
+        try:
+            from google.cloud import storage
+            client = storage.Client()
+            _storage_client = client.bucket(_GCS_BUCKET_NAME)
+        except Exception as e:
+            print(f"[WARN] Cloud Storage not available: {e}. Using in-memory fallback.")
+    return _storage_client
+
+
 # ─────────────────────────────────────────────
 # In-memory fallback data (for local development)
 # ─────────────────────────────────────────────
@@ -34,6 +50,8 @@ from .grounding_data import INTERVIEW_QUESTIONS, GROUNDING_KNOWLEDGE, IMPROVEMEN
 
 # Session storage (in-memory fallback)
 _sessions: dict = {}
+# Recording metadata (in-memory fallback)
+_recordings: dict = {}
 
 
 def get_interview_question(role: str, difficulty: str = "medium", category: str = "behavioral") -> dict:
@@ -305,4 +323,133 @@ def get_session_history(session_id: str) -> dict:
         "scores": [],
         "average_score": 0,
         "message": "No history yet — let's get started!"
+    }
+
+
+def save_session_recording(
+    session_id: str,
+    recording_type: str = "audio",
+    duration_seconds: int = 0,
+    notes: str = "",
+) -> dict:
+    """Records metadata about a practice session recording and saves it to
+    Cloud Storage for later review. This enables candidates to replay their
+    sessions and track improvement over time.
+
+    Args:
+        session_id: Unique session identifier for this recording
+        recording_type: Type of recording ('audio', 'video', 'full_session')
+        duration_seconds: Total duration of the recorded session in seconds
+        notes: Optional notes or summary about the recording content
+
+    Returns:
+        Confirmation with storage location and session summary.
+    """
+    timestamp = datetime.now(timezone.utc).isoformat()
+    recording_id = f"{session_id}_{recording_type}_{timestamp.replace(':', '-')}"
+
+    recording_meta = {
+        "recording_id": recording_id,
+        "session_id": session_id,
+        "recording_type": recording_type,
+        "duration_seconds": duration_seconds,
+        "notes": notes,
+        "timestamp": timestamp,
+    }
+
+    bucket = _get_storage_bucket()
+    storage_path = f"recordings/{session_id}/{recording_id}.json"
+
+    if bucket:
+        try:
+            import json as _json
+            blob = bucket.blob(storage_path)
+            blob.upload_from_string(
+                _json.dumps(recording_meta),
+                content_type="application/json",
+            )
+            recording_meta["gcs_path"] = f"gs://{_GCS_BUCKET_NAME}/{storage_path}"
+        except Exception as e:
+            print(f"[WARN] Cloud Storage save failed: {e}")
+            recording_meta["gcs_path"] = "local_fallback"
+    else:
+        recording_meta["gcs_path"] = "local_fallback"
+
+    # Always store in memory too
+    if session_id not in _recordings:
+        _recordings[session_id] = []
+    _recordings[session_id].append(recording_meta)
+
+    return {
+        "status": "saved",
+        "recording_id": recording_id,
+        "storage_path": recording_meta["gcs_path"],
+        "duration_seconds": duration_seconds,
+        "total_recordings": len(_recordings.get(session_id, [])),
+    }
+
+
+def generate_session_report(session_id: str) -> dict:
+    """Generates a comprehensive end-of-session report summarizing the
+    candidate's overall performance, score trends, strengths, and areas
+    for improvement. Call this when the candidate ends their session.
+
+    Args:
+        session_id: The unique session identifier to generate a report for
+
+    Returns:
+        A comprehensive session report with overall assessment and actionable next steps.
+    """
+    history_data = get_session_history(session_id)
+
+    if history_data.get("total_questions", 0) == 0:
+        return {
+            "report": "No questions were answered in this session.",
+            "recommendations": ["Try answering at least 3 questions for meaningful feedback."],
+        }
+
+    history = history_data.get("history", [])
+    total_q = history_data["total_questions"]
+    avg_score = history_data.get("average_score", 0)
+    best_score = history_data.get("best_score", 0)
+    improvement = history_data.get("improvement", 0)
+
+    # Identify strongest and weakest areas across all answers
+    area_totals = {"confidence": 0, "clarity": 0, "body_language": 0, "content": 0}
+    for entry in history:
+        area_totals["confidence"] += entry.get("confidence", 0)
+        area_totals["clarity"] += entry.get("clarity", 0)
+        area_totals["body_language"] += entry.get("body_language", 0)
+        area_totals["content"] += entry.get("content", 0)
+
+    area_averages = {k: round(v / total_q) for k, v in area_totals.items()}
+    strongest = max(area_averages, key=lambda k: area_averages[k])
+    weakest = min(area_averages, key=lambda k: area_averages[k])
+
+    # Build performance tier
+    if avg_score >= 85:
+        tier = "Excellent — Interview Ready"
+    elif avg_score >= 70:
+        tier = "Good — Minor Refinements Needed"
+    elif avg_score >= 55:
+        tier = "Developing — Focused Practice Recommended"
+    else:
+        tier = "Building Foundation — Regular Practice Essential"
+
+    return {
+        "session_id": session_id,
+        "total_questions_answered": total_q,
+        "average_score": avg_score,
+        "best_score": best_score,
+        "score_improvement": improvement,
+        "performance_tier": tier,
+        "area_averages": area_averages,
+        "strongest_area": strongest.replace("_", " ").title(),
+        "weakest_area": weakest.replace("_", " ").title(),
+        "recommendations": [
+            f"Focus extra practice on {weakest.replace('_', ' ')} — your current average is {area_averages[weakest]}%",
+            f"Your {strongest.replace('_', ' ')} is strong at {area_averages[strongest]}% — maintain this!",
+            "Try to answer 3-5 more questions targeting your weak areas",
+            "Record yourself and review the playback to build self-awareness",
+        ],
     }

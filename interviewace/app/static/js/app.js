@@ -128,7 +128,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.log("🔌 WebSocket disconnected");
             statusText.textContent = "Disconnected";
             statusDot.className = "status-dot disconnected";
-            cleanup();
+            // Deliberately NOT calling cleanup() here. If the WS drops (e.g. invalid API key), 
+            // we want to keep the local mic and camera running so the user can still 
+            // verify the UI interaction works.
         };
 
         ws.onerror = (error) => {

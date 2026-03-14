@@ -9,6 +9,27 @@ class Dashboard {
         this.scoreHistory = [];
         this.currentOverallScore = 0;
         this.questionsAnswered = 0;
+
+        // Start session duration timer
+        this.sessionStartTime = Date.now();
+        this.durationIntervalId = setInterval(() => this.updateDuration(), 1000);
+    }
+
+    updateDuration() {
+        const elapsedMs = Date.now() - this.sessionStartTime;
+        const totalSeconds = Math.floor(elapsedMs / 1000);
+        const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+        const seconds = String(totalSeconds % 60).padStart(2, '0');
+        if (this.statDuration) {
+            this.statDuration.textContent = `${minutes}:${seconds}`;
+        }
+    }
+
+    destroy() {
+        if (this.durationIntervalId) {
+            clearInterval(this.durationIntervalId);
+            this.durationIntervalId = null;
+        }
     }
 
     cacheDOM() {
