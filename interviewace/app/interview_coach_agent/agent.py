@@ -6,7 +6,6 @@ import os
 from google.adk.agents import Agent
 from .prompts import COACH_ACE_INSTRUCTION, AGENT_DESCRIPTION
 from .tools import (
-    get_interview_question,
     save_session_feedback,
     detect_filler_words,
     analyze_body_language,
@@ -26,12 +25,11 @@ root_agent = Agent(
     instruction=COACH_ACE_INSTRUCTION,
     tools=[
         # Tier 1 - Core + Filler + Body Language + STAR
-        get_interview_question,
         save_session_feedback,
         detect_filler_words,
         analyze_body_language,
         evaluate_star_method,
-        # Tier 2 - Voice + Company-specific (embedded in get_interview_question)
+        # Tier 2 - Voice + Company-specific
         analyze_voice_confidence,
         get_improvement_tips,
         fetch_grounding_data,

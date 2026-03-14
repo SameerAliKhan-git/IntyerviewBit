@@ -228,8 +228,81 @@
             </div>
         </div>
 
-    </div><!-- end meetingMain -->
+    </div>
 
+        <!-- NEW: Chat Sidebar -->
+        <div id="chatSidebar" class="right-sidebar">
+            <div class="sidebar-top">
+                <span>In-call messages</span>
+                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+            </div>
+            <div class="sidebar-content" id="chatList">
+                <div class="chat-msg">
+                    <div class="chat-name">Meeting System<span class="chat-time">Now</span></div>
+                    Messages can only be seen by people in the call and are deleted when the call ends.
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chatInput" class="chat-input" placeholder="Send a message to everyone">
+                <button id="chatSendBtn" class="chat-send" disabled><span class="material-icons">send</span></button>
+            </div>
+        </div>
+
+        <!-- NEW: People Sidebar -->
+        <div id="peopleSidebar" class="right-sidebar">
+            <div class="sidebar-top">
+                <span>People</span>
+                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+            </div>
+            <div class="sidebar-content">
+                <div class="participant">
+                    <div class="participant-avatar bg-blue">C</div>
+                    <div class="participant-info">
+                        <div class="participant-name">Coach Ace</div>
+                        <div class="participant-role">Meeting host</div>
+                    </div>
+                    <div class="participant-icons"><span class="material-icons">mic</span><span class="material-icons">more_vert</span></div>
+                </div>
+                <div class="participant">
+                    <div class="participant-avatar bg-purple">E</div>
+                    <div class="participant-info">
+                        <div class="participant-name">Elena</div>
+                        <div class="participant-role">Notetaker</div>
+                    </div>
+                    <div class="participant-icons"><span class="material-icons">mic_off</span><span class="material-icons">more_vert</span></div>
+                </div>
+                <div class="participant">
+                    <div class="participant-avatar" style="background:#5f6368">Y</div>
+                    <div class="participant-info">
+                        <div class="participant-name">You</div>
+                    </div>
+                    <div class="participant-icons"><span class="material-icons" id="peopleMicIcon">mic</span><span class="material-icons">more_vert</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- NEW: Meeting Details Sidebar -->
+        <div id="detailsSidebar" class="right-sidebar">
+            <div class="sidebar-top">
+                <span>Meeting details</span>
+                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+            </div>
+            <div class="sidebar-content">
+                <div class="detail-box">
+                    <div class="detail-label">Joining info</div>
+                    <div class="detail-val">localhost:8080/meeting/interviewace</div>
+                    <div style="margin-top:8px; display:flex; gap:8px; color:#1a73e8; font-size:14px; cursor:pointer;" onclick="navigator.clipboard.writeText('localhost:8080/meeting/interviewace'); showToast('Meeting link copied');">
+                        <span class="material-icons" style="font-size:18px;">content_copy</span> Copy joining info
+                    </div>
+                </div>
+                <div class="detail-box">
+                    <div class="detail-label">Session Parameters</div>
+                    <div class="detail-val" id="detailParams">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- end meetingMain -->
     <!-- Bottom Control Bar -->
     <div class="bottom-bar" id="bottomBar" style="display:none;">
         <div class="bar-section left">

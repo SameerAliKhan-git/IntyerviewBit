@@ -130,13 +130,63 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => t.remove(), duration);
     }
 
-    // Toast interaction buttons
+    // SIDEBAR LOGIC (NEW)
+    const chatSidebar = document.getElementById('chatSidebar');
+    const peopleSidebar = document.getElementById('peopleSidebar');
+    const detailsSidebar = document.getElementById('detailsSidebar');
+    const detailParams = document.getElementById('detailParams');
+    const chatInput = document.getElementById('chatInput');
+    const chatSendBtn = document.getElementById('chatSendBtn');
+    const chatList = document.getElementById('chatList');
+
+    window.closeAllSidebars = function() {
+        if(chatSidebar) chatSidebar.classList.remove('open');
+        if(peopleSidebar) peopleSidebar.classList.remove('open');
+        if(detailsSidebar) detailsSidebar.classList.remove('open');
+    }
+
+    // Interactive buttons
     document.querySelectorAll('.interaction-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const action = btn.getAttribute('data-action');
-            if (action) showToast(`"${action}" is unavailable during a mock interview.`);
+            if (action === 'Chat') {
+                window.closeAllSidebars();
+                chatSidebar.classList.add('open');
+            } else if (action === 'People') {
+                window.closeAllSidebars();
+                peopleSidebar.classList.add('open');
+            } else if (action === 'Meeting details') {
+                window.closeAllSidebars();
+                detailParams.innerHTML = `Role: <b style="color:#1a73e8">${selectedRole}</b><br>Company: <b style="color:#1a73e8">${selectedCompany}</b><br>Diff: <b style="color:#1a73e8">${selectedDifficulty}</b>`;
+                detailsSidebar.classList.add('open');
+            } else if (action) {
+                showToast(`"${action}" is unavailable early in the call.`);
+            }
         });
     });
+
+    // Chat Logic
+    if(chatInput) {
+        chatInput.addEventListener('input', () => { chatSendBtn.disabled = chatInput.value.trim() === ''; });
+        chatInput.addEventListener('keypress', (e) => { if(e.key === 'Enter') chatSendBtn.click(); });
+        chatSendBtn.addEventListener('click', () => {
+            const text = chatInput.value.trim();
+            if(!text) return;
+            const div = document.createElement('div');
+            div.className = 'chat-msg me';
+            const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+            div.innerHTML = `<div class="chat-name">You<span class="chat-time">${time}</span></div>${text}`;
+            chatList.appendChild(div);
+            // Scroll to bottom
+            chatList.scrollTop = chatList.scrollHeight;
+            
+            // Send to backend Gemini Model natively
+            sendJson({ type: "text", text: `(In chat) Candidate says: ${text}` });
+
+            chatInput.value = '';
+            chatSendBtn.disabled = true;
+        });
+    }
 
     // ==========================================
     // SETUP & JOIN
