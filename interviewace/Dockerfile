@@ -1,9 +1,7 @@
 FROM python:3.11-slim
 
-# Set working directory
-WORKDIR /app
-
 # Install system dependencies
+WORKDIR /interviewace
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
@@ -18,14 +16,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the entire app
 COPY . .
 
+# Set working directory to where main.py lives
+# This ensures "from interview_coach_agent.agent import root_agent" works
+WORKDIR /interviewace/app
+
 # Expose the port Cloud Run uses
 ENV PORT=8080
-ENV K_SERVICE=interviewace
 EXPOSE 8080
 
-# Run uvicorn directly — this ensures proper WebSocket support
-# and avoids reload/watchfiles issues in containers
-CMD ["uvicorn", "app.main:app", \
+# Run uvicorn directly from the app/ directory
+# "main:app" means main.py's FastAPI `app` object
+CMD ["uvicorn", "main:app", \
      "--host", "0.0.0.0", \
      "--port", "8080", \
      "--log-level", "info", \
