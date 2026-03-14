@@ -44,11 +44,6 @@ class CameraManager {
             return true;
         } catch (error) {
             console.error("❌ Camera error:", error);
-            const msg = document.createElement('div');
-            msg.className = 'system-msg';
-            msg.style.color = 'var(--danger)';
-            msg.textContent = 'Camera access denied. Body language analysis disabled.';
-            document.getElementById('transcriptArea').appendChild(msg);
             return false;
         }
     }
