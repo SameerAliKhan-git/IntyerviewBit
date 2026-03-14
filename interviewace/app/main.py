@@ -90,7 +90,7 @@ async def health_check():
 # ─────────────────────────────────────────────
 
 @app.websocket("/ws/{user_id}/{session_id}")
-async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str):
+async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str, voice: str = "Puck"):
     """
     WebSocket endpoint for bidirectional streaming with the interview coach agent.
     
@@ -99,7 +99,7 @@ async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str)
     - Downstream task: run_live() events → Client (agent responses)
     """
     await websocket.accept()
-    print(f"\n🔗 New connection: user={user_id}, session={session_id}")
+    print(f"\n🔗 New connection: user={user_id}, session={session_id}, voice={voice}")
 
     # ── Create or retrieve session ──
     session = await session_service.get_session(
@@ -120,11 +120,22 @@ async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str)
     # ── Configure RunConfig based on model ──
     model_name = root_agent.model or ""
     
+    # ── Map Voice to Persona ──
+    voice_personas = {
+        "Kore": "You are Kore, a highly professional, strict, and formal corporate interviewer. Be highly concise, serious, and evaluate the candidate rigorously. Speak directly to the point.",
+        "Aoede": "You are Aoede, a warm, supportive, and empathetic HR interviewer. Provide gentle encouragement, speak warmly, and focus on building the candidate's confidence.",
+        "Charon": "You are Charon, a deep, analytical, and critical technical interviewer. Ask tough, probing follow-up questions. Press the candidate on details and be slightly intimidating.",
+        "Fenrir": "You are Fenrir, an energetic, fast-paced, and wildly enthusiastic startup founder. Be upbeat, talk quickly, use startup jargon, and focus on passion and innovation.",
+        "Puck": "You are Puck, a bright, cheerful, and highly creative design interviewer. Maintain a highly informal, fun, and upbeat tone. Encourage outside-the-box thinking."
+    }
+    selected_persona = voice_personas.get(voice, "You are an AI interview coach.")
+    
     if "flash" in model_name:
         # Native Audio Model — full audio bidi streaming
         run_config = RunConfig(
             streaming_mode=StreamingMode.BIDI,
             response_modalities=["AUDIO"],
+            system_instruction=types.Content(parts=[types.Part.from_text(text=selected_persona)]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             session_resumption=types.SessionResumptionConfig(
@@ -133,12 +144,12 @@ async def websocket_handler(websocket: WebSocket, user_id: str, session_id: str)
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Kore"  # Professional, warm voice for Coach Ace
+                        voice_name=voice  # Voice selected by user
                     )
                 )
             ),
         )
-        print("  🎙️  Mode: Native Audio (full bidi streaming)")
+        print(f"  🎙️  Mode: Native Audio (Voice: {voice}, Persona: {voice})")
     else:
         # Half-cascade model — text-based responses
         run_config = RunConfig(

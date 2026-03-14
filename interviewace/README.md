@@ -18,11 +18,17 @@
     -  ✅ **GDG Member:** Active Google Developer Group membership (`+0.2 pts`).
 
 ## 🏗️ Architecture Stack
+
+![InterviewAce Architecture Flow](architecture.png)
+
+See the full data flow details in our [ARCHITECTURE.md](ARCHITECTURE.md).
+
 1.  **Frontend:** Glassmorphic pure JS/HTML/CSS dashboard. WebRTC captures raw 16kHz PCM audio + continuous base64 webcam frames and pushes them over WebSockets.
 2.  **Backend Controller:** FastAPI. Maps WebSocket payloads directly into ADK's `LiveRequestQueue`.
 3.  **ADK Core Engine:** The `interview_coach_agent` (Coach Ace). 
     - Perceives both video frames (vision) and audio (voice).
-    - Interacts with custom tools connected to Firestore to pull interview best practices (STAR method) and save session history.
+    - Outputs native audio speech (`response_modalities=["AUDIO"]`) through the Gemini Live API.
+    - Interacts with custom tools connected to **Firestore** and **Cloud Storage** to pull interview best practices (STAR method), save session history, and track long-term progress.
 
 ## 🚀 Spin-Up Instructions (Local Development)
 
@@ -39,24 +45,33 @@ cd interviewace
 python -m venv venv
 source venv/bin/activate  # Or `venv\Scripts\activate` on Windows
 
-pip install -r deploy/requirements.txt
+pip install -r requirements.txt
 ```
 
-### 2. Configure Credentials
-```bash
-gcloud auth application-default login
-export GOOGLE_CLOUD_PROJECT="your-project-id"
-```
+### 2. Configure Credentials & API Keys
+You MUST supply a valid Gemini API key to use the live voice features.
+
+1. Copy the example `.env` file: `cp .env.example .env`
+2. Open `.env` and add your key: `GEMINI_API_KEY="your_actual_key_here"`
+3. Make sure the model in `.env` is set to the Live API model:
+   ```env
+   AGENT_MODEL="gemini-2.5-flash-native-audio-preview"
+   ```
+
+*(Optional)* If you set up Firestore, change `USE_FIRESTORE="true"`. Otherwise, it falls back to an in-memory database gracefully.
 
 ### 3. Run the Backend
 ```bash
-cd app
 # Start the FastAPI + ADK Application
-python main.py
+python app/main.py
+# Or run with uvicorn: uvicorn app.main:app --reload --port 8080
 ```
 > The web UI will now be available at `http://localhost:8080/`. Grant camera and mic permissions to begin your interview!
 
-## ☁️ Cloud Deployment Instructions (Bonus Points)
+## 🖥️ Proof of Cloud Deployment (Hackathon Requirement)
+*For Judges:* Please see the `deploy/terraform` directory for the exact Google Cloud infrastructure used (Cloud Run, Firestore, Cloud Storage). To watch the deployment proof and live platform logs, see our submitted 4-minute demonstration video.
+
+## ☁️ Cloud Deployment Instructions (Automated)
 To deploy this project automatically to Google Cloud Run, we have provided an automated deployment script and Terraform configurations.
 
 ### Option A: Bash Deploy Script

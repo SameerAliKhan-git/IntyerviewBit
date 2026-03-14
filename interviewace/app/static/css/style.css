@@ -132,6 +132,7 @@ body {
     letter-spacing: -0.5px;
     background: var(--gradient-primary);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -269,6 +270,7 @@ body {
     background: var(--primary);
     border-radius: 3px;
     height: 4px;
+    transition: height 0.05s ease-out;
 }
 
 .voice-visualizer.active .bar {
@@ -337,15 +339,56 @@ body {
     margin: auto;
 }
 
-/* Controls */
-.controls {
-    display: flex;
-    justify-content: center;
-    gap: 1rem;
+/* Controls row wrapper */
+.controls-row {
     padding-top: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     border-top: 1px solid var(--glass-border);
     margin-top: 1rem;
+    flex-wrap: wrap;
+    gap: 1rem;
 }
+
+.coach-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.settings-select {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--glass-border);
+    color: var(--text-light);
+    padding: 0.4rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    outline: none;
+    cursor: pointer;
+}
+.settings-select option { background: #111; }
+
+.speed-control {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+.speed-control input[type=range] {
+    width: 80px;
+    accent-color: var(--primary);
+}
+
+.controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.user-visualizer { margin-right: 0.5rem; }
+.user-visualizer .bar { background: #10b981 !important; /* Green */ }
 
 .control-btn {
     width: 48px; height: 48px;
@@ -421,6 +464,7 @@ body {
     font-weight: 800;
     background: var(--gradient-score);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
     line-height: 1;
 }

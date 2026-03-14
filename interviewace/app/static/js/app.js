@@ -31,11 +31,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     const micBtn = document.getElementById('micBtn');
     const cameraBtn = document.getElementById('cameraBtn');
     const endBtn = document.getElementById('endBtn');
+    const sessionBtn = document.getElementById('sessionBtn');
+    
+    let isSessionStarted = false;
 
     // ── WebSocket ──
     let ws = null;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}`;
+    
+    // ── Settings Elements ──
+    const voiceSelect = document.getElementById('voiceSelect');
+    const speedSlider = document.getElementById('speedSlider');
+    const speedVal = document.getElementById('speedVal');
+    const userVisualizer = document.getElementById('userVisualizer');
 
     /**
      * Initializes the entire application flow
@@ -63,12 +71,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
             }
 
-            // 4. Connect WebSocket
-            connectWebSocket();
+            // We setup ADK but DO NOT connect WS yet. E.g wait for user to click Start.
+            statusText.textContent = "Ready - Press Start";
 
         } catch (error) {
             console.error("❌ Initialization failed:", error);
-            statusText.textContent = "Initialization Failed";
+            statusText.textContent = "Error Accessing Hardware";
             statusDot.className = "status-dot disconnected";
         }
     }
@@ -78,6 +86,11 @@ document.addEventListener('DOMContentLoaded', async () => {
      */
     function connectWebSocket() {
         statusText.textContent = "Connecting...";
+        
+        if (ws) { ws.close(); }
+        
+        const voice = voiceSelect ? voiceSelect.value : "Kore";
+        const wsUrl = `${protocol}//${window.location.host}/ws/${userId}/${sessionId}?voice=${voice}`;
         
         ws = new WebSocket(wsUrl);
 
@@ -95,13 +108,37 @@ document.addEventListener('DOMContentLoaded', async () => {
             // Start Audio Recording (after WS is open so we can send data)
             if (audioRecorder) {
                 try {
-                    await audioRecorder.start((pcmData) => {
+                    await audioRecorder.start((pcmData, volume) => {
                         // Send binary PCM chunk over WebSocket
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(pcmData);
                         }
+                        
+                        // Highly Sensitive Real-time Mic Visualizer
+                        if (userVisualizer && volume !== undefined && !audioRecorder.isMuted) {
+                            requestAnimationFrame(() => {
+                                const bars = userVisualizer.querySelectorAll('.bar');
+                                const noiseFloor = 0.005;
+                                if (volume > noiseFloor) {
+                                    const scaleLog = Math.max(0, (Math.log10(volume) - Math.log10(noiseFloor)) * 15);
+                                    bars.forEach((bar) => {
+                                        const h = Math.max(4, Math.min(22, scaleLog * (0.8 + Math.random() * 0.4)));
+                                        bar.style.height = `${h}px`;
+                                    });
+                                } else {
+                                    bars.forEach(bar => bar.style.height = '4px');
+                                }
+                            });
+                        } else if (userVisualizer) {
+                            const bars = userVisualizer.querySelectorAll('.bar');
+                            bars.forEach(bar => bar.style.height = '4px');
+                        }
                     });
                     console.log("🎤 Audio recording started");
+                    if (!audioRecorder.isMuted) {
+                        micBtn.classList.add('active');
+                        micBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
+                    }
                 } catch (e) {
                     console.error("❌ Failed to start audio recorder:", e);
                 }
@@ -230,10 +267,54 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (!audioRecorder) return;
         const isEnabled = audioRecorder.toggleMute();
         micBtn.classList.toggle('active', isEnabled);
+        
         micBtn.innerHTML = isEnabled 
             ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>'
             : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
     });
+
+    sessionBtn.addEventListener('click', () => {
+        if (!isSessionStarted) {
+            // Start
+            connectWebSocket();
+            isSessionStarted = true;
+            sessionBtn.innerHTML = '⏸ Pause';
+            sessionBtn.style.background = '#eab308'; // Warning/yellow color
+            sessionBtn.style.borderColor = '#eab308';
+            micBtn.disabled = false;
+            cameraBtn.disabled = false;
+            endBtn.disabled = false;
+        } else {
+            // Pause
+            if (audioRecorder) audioRecorder.stop();
+            if (camera) camera.stop();
+            if (ws) ws.close();
+            isSessionStarted = false;
+            sessionBtn.innerHTML = '▶ Resume';
+            sessionBtn.style.background = 'var(--safe)';
+            sessionBtn.style.borderColor = 'var(--safe)';
+            statusText.textContent = "Paused";
+            statusDot.className = "status-dot disconnected";
+        }
+    });
+
+    if (voiceSelect) {
+        voiceSelect.addEventListener('change', () => {
+            console.log("🗣️ Voice changed to:", voiceSelect.value);
+            // Reconnect websocket with new voice param
+            connectWebSocket();
+        });
+    }
+
+    if (speedSlider && speedVal) {
+        speedSlider.addEventListener('input', () => {
+            const speed = parseFloat(speedSlider.value);
+            speedVal.textContent = speed.toFixed(1) + 'x';
+            if (audioPlayer) {
+                audioPlayer.playbackSpeed = speed;
+            }
+        });
+    }
 
     cameraBtn.addEventListener('click', () => {
         if (!camera) return;

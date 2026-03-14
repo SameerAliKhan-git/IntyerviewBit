@@ -9,6 +9,7 @@ class AudioPlayer {
         this.context = audioContext;
         this.processor = null;
         this.isPlaying = false;
+        this.playbackSpeed = 1.0;
         this.initPromise = this.initWorklet();
     }
 
@@ -42,8 +43,19 @@ class AudioPlayer {
             // The Float32 conversion handles playback
             const float32Data = this.int16ToFloat32(new Int16Array(bytes.buffer));
             
+            // Adjust speech speed using naive interpolation
+            let finalData = float32Data;
+            if (this.playbackSpeed && this.playbackSpeed !== 1.0) {
+                const speed = this.playbackSpeed;
+                const newLen = Math.floor(float32Data.length / speed);
+                finalData = new Float32Array(newLen);
+                for (let i = 0; i < newLen; i++) {
+                    finalData[i] = float32Data[Math.floor(i * speed)];
+                }
+            }
+            
             if (this.processor) {
-                this.processor.port.postMessage(float32Data);
+                this.processor.port.postMessage(finalData);
                 this.isPlaying = true;
             }
         } catch (e) {

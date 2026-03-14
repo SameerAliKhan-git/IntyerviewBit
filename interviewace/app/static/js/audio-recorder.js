@@ -38,11 +38,20 @@ class AudioRecorder {
 
             this.processor.port.onmessage = (e) => {
                 if (this.isRecording && !this.isMuted && onDataCallback && e.data) {
-                    // e.data is a Float32Array containing PCM data
+                    const float32Data = e.data;
+                    
+                    // Calculate volume level for visualizer
+                    let sumSq = 0;
+                    for (let i = 0; i < float32Data.length; i++) {
+                        sumSq += float32Data[i] * float32Data[i];
+                    }
+                    const volume = Math.sqrt(sumSq / float32Data.length);
+
                     // Convert Float32Array to Int16Array (PCM 16-bit)
-                    const pcmData = this.float32ToInt16(e.data);
-                    // Send raw binary ArrayBuffer — backend expects binary WS frames
-                    onDataCallback(pcmData.buffer);
+                    const pcmData = this.float32ToInt16(float32Data);
+                    
+                    // Send raw binary ArrayBuffer and volume
+                    onDataCallback(pcmData.buffer, volume);
                 }
             };
 
