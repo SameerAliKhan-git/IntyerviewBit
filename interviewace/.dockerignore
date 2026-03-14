@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Environment variables — NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
