@@ -81,6 +81,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let ccTimeout = null;
     let ccEnabled = true;
     let sidebarOpen = true;
+    let sessionStartTime = null;
+    let sessionTimerInterval = null;
 
     // Hardware
     const camera = new window.CameraManager();
@@ -115,10 +117,17 @@ document.addEventListener('DOMContentLoaded', () => {
     let selectedDifficulty = 'medium';
     let selectedVoice = 'Kore';
 
-    // Clock
+    // Clock — show session elapsed time once active
     setInterval(() => {
         const d = new Date();
-        clockTime.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (sessionStartTime && isActive) {
+            const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
+            const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const ss = String(elapsed % 60).padStart(2, '0');
+            clockTime.textContent = `${mm}:${ss}`;
+        } else {
+            clockTime.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
     }, 1000);
 
     // Toast
@@ -294,6 +303,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         ws.onopen = async () => {
             isActive = true;
+            sessionStartTime = Date.now();
             thinkingOverlay.style.display = 'block';
             ccBtn.disabled = false;
             ccBtn.classList.add('active');
@@ -550,6 +560,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function cleanup() {
         isActive = false;
+        // Save scores to localStorage so they survive reload
+        try { localStorage.setItem('ia_last_scores', JSON.stringify({...finalScores, totalFillers, selectedRole, selectedCompany, selectedDifficulty})); } catch(e) {}
         if (audioRecorder) audioRecorder.stop();
         if (audioPlayer) audioPlayer.stop();
         if (agentVis) agentVis.stop();

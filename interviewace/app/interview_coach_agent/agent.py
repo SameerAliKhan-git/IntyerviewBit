@@ -4,6 +4,7 @@ InterviewAce - Root Agent Definition (3 Tiers Enabled).
 
 import os
 from google.adk.agents import Agent
+from google.adk.tools import google_search
 from .prompts import COACH_ACE_INSTRUCTION, AGENT_DESCRIPTION
 from .tools import (
     save_session_feedback,
@@ -37,5 +38,7 @@ root_agent = Agent(
         get_session_history,
         save_session_recording,
         generate_session_report,
+        # Grounding — prevents hallucinations (ADK built-in)
+        google_search,
     ],
 )

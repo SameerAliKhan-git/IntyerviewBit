@@ -74,6 +74,16 @@ async def health():
     return {"status": "healthy", "agent": root_agent.name, "model": root_agent.model}
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serve favicon to eliminate 404 console errors."""
+    favicon_path = Path(__file__).parent / "static" / "favicon.ico"
+    if favicon_path.exists():
+        return FileResponse(favicon_path, media_type="image/x-icon")
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+
 # ========================================
 @app.websocket("/ws/{user_id}/{session_id}")
 async def websocket_endpoint(
