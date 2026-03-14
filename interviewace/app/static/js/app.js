@@ -96,7 +96,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const micBtn = document.getElementById('micBtn');
     const cameraBtn = document.getElementById('cameraBtn');
     const ccBtn = document.getElementById('ccBtn');
-    const analyticsBtn = document.getElementById('analyticsBtn');
     const thinkingOverlay = document.getElementById('thinkingOverlay');
     const transcribingBadge = document.getElementById('transcribingBadge');
     const agentMicIcon = document.getElementById('agentMicIcon');
@@ -131,16 +130,8 @@ document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => t.remove(), duration);
     }
 
-    // Sidebar toggle
-    window.toggleSidebar = function() {
-        sidebarOpen = !sidebarOpen;
-        if (sidebarOpen) sidebar.classList.remove('hidden');
-        else sidebar.classList.add('hidden');
-    };
-    analyticsBtn.addEventListener('click', () => { window.toggleSidebar(); });
-
-    // Toast interaciton buttons
-    document.querySelectorAll('.interaction-btn:not(#analyticsBtn)').forEach(btn => {
+    // Toast interaction buttons
+    document.querySelectorAll('.interaction-btn').forEach(btn => {
         btn.addEventListener('click', () => {
             const action = btn.getAttribute('data-action');
             if (action) showToast(`"${action}" is unavailable during a mock interview.`);
@@ -438,6 +429,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function showFeedbackPanel() {
+        // Reveal the analytics sidebar now that the interview is done
+        sidebarOpen = true;
+        sidebar.classList.remove('hidden');
+
         const panel = document.getElementById('feedbackPanel');
         panel.style.display = 'flex';
 

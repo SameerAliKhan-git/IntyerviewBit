@@ -70,8 +70,8 @@
     <!-- MAIN MEETING INTERFACE -->
     <div id="meetingMain" class="meet-main" style="display:none;">
 
-        <!-- Live Analytics Sidebar -->
-        <div class="analytics-sidebar" id="analyticsSidebar">
+        <!-- Live Analytics Sidebar — shown after interview ends -->
+        <div class="analytics-sidebar hidden" id="analyticsSidebar">
             <div class="sidebar-header">
                 <span class="material-icons">insights</span>
                 <span>Live Analysis</span>
@@ -246,9 +246,6 @@
             </button>
             <button class="meet-btn cc-btn" id="ccBtn" title="Captions (c)" disabled>
                 <span class="material-icons">closed_caption</span>
-            </button>
-            <button class="meet-btn interaction-btn" title="Analytics" id="analyticsBtn" data-action="Analytics">
-                <span class="material-icons">insights</span>
             </button>
             <button class="meet-btn interaction-btn" title="Raise Hand" data-action="Raise Hand">
                 <span class="material-icons">back_hand</span>

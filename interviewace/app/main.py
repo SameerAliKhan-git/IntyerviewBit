@@ -104,8 +104,9 @@ async def websocket_endpoint(
         run_config = RunConfig(
             streaming_mode=StreamingMode.BIDI,
             response_modalities=["AUDIO"],
-            # Keep output transcription only — drives CC display with minimal overhead
+            input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
+            session_resumption=types.SessionResumptionConfig(),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
@@ -119,6 +120,9 @@ async def websocket_endpoint(
         run_config = RunConfig(
             streaming_mode=StreamingMode.BIDI,
             response_modalities=["TEXT"],
+            input_audio_transcription=None,
+            output_audio_transcription=None,
+            session_resumption=types.SessionResumptionConfig(),
         )
         logger.info(f"Half-cascade model detected: {model_name}, using TEXT modality")
 
