@@ -232,18 +232,24 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", 8080))
+    is_cloud = os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN", "")
+
     print("="*60)
     print("  InterviewAce - AI Interview Coach")
     print("  Built with Google ADK & Gemini Live API")
     print("="*60)
     print(f"  Agent: {root_agent.name}")
     print(f"  Model: {root_agent.model}")
+    print(f"  Environment: {'Cloud Run' if is_cloud else 'Local'}")
     print("=" * 60)
 
     uvicorn.run(
-        "main:app",
+        "app.main:app" if is_cloud else "main:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=not is_cloud,
         log_level="info",
+        ws_max_size=16 * 1024 * 1024,  # 16MB for audio + image frames
+        timeout_keep_alive=300,
     )
+
