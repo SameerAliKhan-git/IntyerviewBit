@@ -370,6 +370,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // Intercept custom tool responses from our explicit ws_manager broadcast
+        if (evt.customToolResponse) {
+            processToolResult(evt.customToolResponse);
+        }
+
         // Transcriptions (CC + History)
         const inTrans = evt.inputTranscription || evt.input_transcription;
         if (inTrans && inTrans.text && inTrans.text.trim()) {

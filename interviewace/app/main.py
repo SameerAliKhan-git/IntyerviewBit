@@ -33,6 +33,7 @@ from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from interview_coach_agent.agent import root_agent  # noqa: E402
+from ws_manager import register_ws, unregister_ws  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +84,22 @@ async def favicon():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+@app.get("/debug")
+async def debug():
+    """Debug endpoint — check if environment is configured correctly."""
+    import os
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    return {
+        "api_key_set": bool(api_key),
+        "api_key_length": len(api_key),
+        "api_key_prefix": api_key[:8] + "..." if len(api_key) > 8 else "MISSING",
+        "model": root_agent.model,
+        "agent": root_agent.name,
+        "tools_count": len(root_agent.tools) if root_agent.tools else 0,
+        "k_service": os.getenv("K_SERVICE", "not_set"),
+        "vertexai": os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "not_set"),
+    }
+
 
 # ========================================
 @app.websocket("/ws/{user_id}/{session_id}")
@@ -100,7 +117,12 @@ async def websocket_endpoint(
     logger.info(
         f"WebSocket connection: user={user_id}, session={session_id}, voice={voice}"
     )
-    await websocket.accept()
+    try:
+        await websocket.accept()
+        register_ws(session_id, websocket)
+    except Exception as e:
+        logger.error(f"Failed to accept WebSocket: {e}")
+        return
     logger.info("WebSocket connection accepted")
 
     # ========================================
@@ -216,11 +238,18 @@ async def websocket_endpoint(
         logger.info("Client disconnected normally")
     except Exception as e:
         logger.error(f"Unexpected error in streaming tasks: {e}", exc_info=True)
+        # Try to send error back to client for debugging
+        try:
+            error_msg = json.dumps({"error": str(e), "type": "server_error"})
+            await websocket.send_text(error_msg)
+        except Exception:
+            pass
     finally:
         # ========================================
         # Phase 4: Session Termination
         # ========================================
         logger.info("Closing live_request_queue")
+        unregister_ws(session_id)
         live_request_queue.close()
 
 

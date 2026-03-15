@@ -23,6 +23,7 @@ def _get_firestore():
             print(f"[WARN] Firestore not available: {e}")
     return _firestore_client
 
+from ws_manager import send_tool_result_sync
 from .grounding_data import INTERVIEW_QUESTIONS, GROUNDING_KNOWLEDGE, IMPROVEMENT_TIPS
 
 # In-memory session store
@@ -202,7 +203,7 @@ def save_session_feedback(
             f"decreased_by_{abs(diff)}_points" if diff < 0 else "same_as_previous"
         )
 
-    return {
+    res = {
         "status": "saved",
         "question_number": question_number,
         "overall_score": overall,
@@ -215,6 +216,9 @@ def save_session_feedback(
         "trend": trend,
         "total_questions_answered": len(history),
     }
+    
+    send_tool_result_sync(session_id, "save_session_feedback", res)
+    return res
 
 
 # ─────────────────────────────────────────────────────
@@ -273,7 +277,7 @@ def detect_filler_words(
         _sessions[key] = []
     _sessions[key].append({"q": question_number, "count": total_count, "detected": detected})
 
-    return {
+    res = {
         "total_filler_words": total_count,
         "detected_fillers": detected,
         "filler_rate_percent": filler_rate,
@@ -281,6 +285,8 @@ def detect_filler_words(
         "coaching_tip": tip,
         "question_number": question_number,
     }
+    send_tool_result_sync(session_id, "detect_filler_words", res)
+    return res
 
 
 # ─────────────────────────────────────────────────────
@@ -474,7 +480,7 @@ def evaluate_star_method(
         "missing": missing,
     })
 
-    return {
+    res = {
         "star_score": base_score,
         "components_present": {
             "situation": had_situation, "task": had_task,
@@ -487,6 +493,9 @@ def evaluate_star_method(
             f"Missing: {', '.join(missing)}. Always include all four parts."
         ),
     }
+    
+    send_tool_result_sync(session_id, "evaluate_star_method", res)
+    return res
 
 
 # ─────────────────────────────────────────────────────
