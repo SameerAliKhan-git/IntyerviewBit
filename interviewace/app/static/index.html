@@ -8,7 +8,7 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css?v=7">
+    <link rel="stylesheet" href="/static/css/style.css?v=11">
 </head>
 <body class="meet-app">
 
@@ -81,6 +81,11 @@
                 </button>
             </div>
 
+            <div class="status-strip">
+                <div class="status-pill" id="connectionStatus">Waiting</div>
+                <div class="status-pill secondary" id="networkStatus">Network: Ready</div>
+            </div>
+
             <!-- Scores -->
             <div class="metric-grid">
                 <div class="metric-card">
@@ -102,6 +107,32 @@
                     <div class="metric-val" id="mBody">—</div>
                     <div class="metric-lbl">Body Language</div>
                     <div class="metric-bar"><div class="metric-fill purple" id="bBody"></div></div>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">show_chart</span>
+                    Improvement Trend
+                </div>
+                <svg id="trendChart" class="mini-chart" viewBox="0 0 260 110" role="img" aria-label="Score trend chart"></svg>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">radar</span>
+                    Competency Radar
+                </div>
+                <svg id="radarChart" class="radar-chart" viewBox="0 0 260 220" role="img" aria-label="Competency radar chart"></svg>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">compare_arrows</span>
+                    Session Comparison
+                </div>
+                <div id="sessionComparison" class="comparison-card">
+                    <div class="session-note">Complete a session to compare against your previous run.</div>
                 </div>
             </div>
 
@@ -141,6 +172,40 @@
                     <div class="si" id="sAction"><span class="si-badge off">A</span>Action</div>
                     <div class="si" id="sResult"><span class="si-badge off">R</span>Result</div>
                 </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">grid_view</span>
+                    Performance Heatmap
+                </div>
+                <div id="heatmapGrid" class="heatmap-grid"></div>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">workspace_premium</span>
+                    Milestones
+                </div>
+                <div id="milestoneBadges" class="badge-list">
+                    <span class="session-note">Badges unlock as you practice.</span>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">school</span>
+                    Learning Path
+                </div>
+                <div id="learningPath" class="learning-list"></div>
+            </div>
+
+            <div class="chart-card">
+                <div class="card-header">
+                    <span class="material-icons">business_center</span>
+                    Role-Specific Coaching
+                </div>
+                <div id="industryCoaching" class="learning-list"></div>
             </div>
         </div>
 
@@ -224,7 +289,7 @@
                 <div class="cc-avatar" id="ccAvatar">C</div>
                 <div class="cc-text-area">
                     <div class="cc-name" id="ccName">Coach Ace</div>
-                    <div class="cc-text" id="ccText">...</div>
+                    <div class="cc-text" id="ccText" aria-live="polite">...</div>
                 </div>
             </div>
         </div>
@@ -335,7 +400,7 @@
             <button class="nav-btn interaction-btn" title="Meeting details" data-action="Meeting details"><span class="material-icons">info_outline</span></button>
             <button class="nav-btn interaction-btn" title="People" data-action="People"><span class="material-icons">people_outline</span></button>
             <button class="nav-btn interaction-btn" title="Chat" data-action="Chat"><span class="material-icons">chat_bubble_outline</span></button>
-            <button class="nav-btn interaction-btn" title="Activities" data-action="Activities"><span class="material-icons">category</span></button>
+            <button class="nav-btn interaction-btn" title="Live Analysis" data-action="Live Analysis"><span class="material-icons">insights</span></button>
         </div>
     </div>
 
@@ -377,9 +442,10 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/audio-player.js?v=10"></script>
-    <script src="/static/js/audio-recorder.js?v=10"></script>
-    <script src="/static/js/camera.js?v=10"></script>
-    <script src="/static/js/app.js?v=10"></script>
+    <script src="/static/js/audio-player.js?v=11"></script>
+    <script src="/static/js/audio-recorder.js?v=11"></script>
+    <script src="/static/js/camera.js?v=11"></script>
+    <script src="/static/js/dashboard.js?v=11"></script>
+    <script src="/static/js/app.js?v=11"></script>
 </body>
 </html>

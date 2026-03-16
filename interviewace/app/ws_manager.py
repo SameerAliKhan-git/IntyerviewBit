@@ -15,10 +15,14 @@ def unregister_ws(session_id: str):
 
 def send_tool_result_sync(session_id: str, tool_name: str, response_data: dict):
     """Called by synchronous tools to send their result down the WebSocket."""
-    if session_id not in _active_websockets:
+    if not _active_websockets:
         return
-    
-    ws, loop = _active_websockets[session_id]
+        
+    if session_id in _active_websockets:
+        ws, loop = _active_websockets[session_id]
+    else:
+        # Fallback for LLM hallucinated session IDs like "default"
+        ws, loop = next(iter(_active_websockets.values()))
     
     # We send a custom event that mimics what the UI expects or what we can easily parse
     payload = {

@@ -1,9 +1,8 @@
 /**
- * app.js - InterviewAce Google Meet Clone Engine (3-Tier Edition)
- * All speech and vision only - no text generation fallback.
+ * app.js
+ * InterviewAce live meeting client with reconnect and analytics rendering.
  */
 
-// -- Google Meet Volume Visualizer --
 class VolumeVisualizer {
     constructor(analyserNode, ringsId, equalizerId, tileId) {
         this.analyser = analyserNode;
@@ -17,31 +16,46 @@ class VolumeVisualizer {
         this.eqContainer = eqContainer;
         this.micIcon = this.tile ? this.tile.querySelector('.mic-icon') : null;
         this.isAnimating = false;
-        this.smoothedVol = 0;
+        this.smoothedVolume = 0;
     }
-    start() { if (!this.isAnimating) { this.isAnimating = true; this.draw(); } }
+
+    start() {
+        if (!this.isAnimating) {
+            this.isAnimating = true;
+            this.draw();
+        }
+    }
+
     stop() {
         this.isAnimating = false;
-        this.rings.forEach(r => { r.style.transform = 'scale(1)'; r.style.opacity = '0'; });
-        this.eqBars.forEach(b => b.style.height = '4px');
+        this.rings.forEach(ring => {
+            ring.style.transform = 'scale(1)';
+            ring.style.opacity = '0';
+        });
+        this.eqBars.forEach(bar => { bar.style.height = '4px'; });
         if (this.tile) this.tile.classList.remove('tile-speaking');
         if (this.eqContainer) this.eqContainer.style.display = 'none';
         if (this.micIcon) this.micIcon.style.display = 'inline-block';
     }
+
     draw() {
         if (!this.isAnimating) return;
         requestAnimationFrame(() => this.draw());
+
         this.analyser.getByteFrequencyData(this.dataArray);
         let sum = 0;
-        for (let i = 0; i < this.bufferLength; i++) sum += this.dataArray[i];
-        const vol = (sum / this.bufferLength) / 128.0;
-        this.smoothedVol = this.smoothedVol * 0.7 + vol * 0.3;
-        const isSpeaking = this.smoothedVol > 0.05;
+        for (let i = 0; i < this.bufferLength; i += 1) {
+            sum += this.dataArray[i];
+        }
+
+        const volume = (sum / this.bufferLength) / 128.0;
+        this.smoothedVolume = this.smoothedVolume * 0.7 + volume * 0.3;
+        const isSpeaking = this.smoothedVolume > 0.05;
 
         if (this.tile) {
-            if (isSpeaking) this.tile.classList.add('tile-speaking');
-            else this.tile.classList.remove('tile-speaking');
+            this.tile.classList.toggle('tile-speaking', isSpeaking);
         }
+
         if (isSpeaking && this.eqContainer) {
             this.eqContainer.style.display = 'flex';
             if (this.micIcon) this.micIcon.style.display = 'none';
@@ -49,50 +63,55 @@ class VolumeVisualizer {
             if (this.eqContainer) this.eqContainer.style.display = 'none';
             if (this.micIcon) this.micIcon.style.display = 'inline-block';
         }
+
         if (this.rings.length === 3) {
-            if (isSpeaking) {
-                this.rings[0].style.transform = `scale(${Math.min(1 + this.smoothedVol * 0.3, 1.4)})`;
-                this.rings[1].style.transform = `scale(${Math.min(1 + this.smoothedVol * 0.6, 1.8)})`;
-                this.rings[2].style.transform = `scale(${Math.min(1 + this.smoothedVol * 1.0, 2.3)})`;
-                this.rings.forEach(r => r.style.opacity = '0.4');
-            } else {
-                this.rings.forEach(r => { r.style.transform = 'scale(1)'; r.style.opacity = '0'; });
-            }
+            const scales = [0.3, 0.6, 1.0];
+            this.rings.forEach((ring, index) => {
+                ring.style.transform = isSpeaking
+                    ? `scale(${Math.min(1 + this.smoothedVolume * scales[index], 2.1)})`
+                    : 'scale(1)';
+                ring.style.opacity = isSpeaking ? '0.35' : '0';
+            });
         }
+
         if (isSpeaking && this.eqBars.length >= 3) {
-            this.eqBars[0].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
-            this.eqBars[1].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 20 * Math.random() + 6))}px`;
-            this.eqBars[2].style.height = `${Math.max(4, Math.min(14, this.smoothedVol * 15 * Math.random() + 4))}px`;
+            this.eqBars[0].style.height = `${Math.max(4, Math.min(15, this.smoothedVolume * 12 + 4))}px`;
+            this.eqBars[1].style.height = `${Math.max(5, Math.min(16, this.smoothedVolume * 16 + 5))}px`;
+            this.eqBars[2].style.height = `${Math.max(4, Math.min(15, this.smoothedVolume * 13 + 4))}px`;
         }
     }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("InterviewAce - 3-Tier Live Agent loading...");
+    const userId = `user_${Math.random().toString(36).slice(2, 9)}`;
+    const sessionId = `session_${Math.random().toString(36).slice(2, 11)}`;
+    const dashboard = new window.Dashboard();
 
-    // State
-    const userId = 'user_' + Math.random().toString(36).substr(2, 9);
-    const sessionId = 'session_' + Math.random().toString(36).substr(2, 11);
     let ws = null;
+    let reconnectTimeout = null;
+    let heartbeatInterval = null;
+    let reconnectAttempts = 0;
+    let manualClose = false;
     let isActive = false;
-    let dialogueHistory = [];
-    let finalScores = {};
-    let totalFillers = 0;
+    let sessionStartTime = null;
     let ccTimeout = null;
     let ccEnabled = true;
-    let sidebarOpen = true;
-    let sessionStartTime = null;
-    let sessionTimerInterval = null;
+    let hasSentIntroPrompt = false;
+    let audioStarted = false;
+    let dialogueHistory = [];
+    let finalReport = {};
 
-    // Hardware
     const camera = new window.CameraManager();
-    let audioRecorder = null, audioPlayer = null, audioContext = null;
-    let userVis = null, agentVis = null;
+    let audioRecorder = null;
+    let audioPlayer = null;
+    let audioContext = null;
+    let userVisualizer = null;
+    let agentVisualizer = null;
 
-    // DOM refs
     const setupPanel = document.getElementById('setupPanel');
     const meetingMain = document.getElementById('meetingMain');
     const bottomBar = document.getElementById('bottomBar');
+    const sidebar = document.getElementById('analyticsSidebar');
     const setupJoinBtn = document.getElementById('setupJoinBtn');
     const endBtn = document.getElementById('endBtn');
     const micBtn = document.getElementById('micBtn');
@@ -107,99 +126,42 @@ document.addEventListener('DOMContentLoaded', () => {
     const ccAvatar = document.getElementById('ccAvatar');
     const ccName = document.getElementById('ccName');
     const ccText = document.getElementById('ccText');
-    const sidebar = document.getElementById('analyticsSidebar');
     const companyBadge = document.getElementById('companyBadge');
     const meetingCode = document.getElementById('meetingCode');
+    const feedbackPanel = document.getElementById('feedbackPanel');
 
-    // Session config from setup
     let selectedRole = 'general';
     let selectedCompany = 'general';
     let selectedDifficulty = 'medium';
     let selectedVoice = 'Kore';
 
-    // Clock — show session elapsed time once active
+    dashboard.setConnectionStatus('idle', 'Waiting');
+    dashboard.setNetworkStatus('Network: Ready');
+
+    window.toggleSidebar = function toggleSidebar() {
+        sidebar.classList.toggle('hidden');
+    };
+
+    window.closeAllSidebars = function closeAllSidebars() {
+        document.querySelectorAll('.right-sidebar').forEach(panel => panel.classList.remove('open'));
+    };
+
     setInterval(() => {
-        const d = new Date();
+        if (!clockTime) return;
         if (sessionStartTime && isActive) {
             const elapsed = Math.floor((Date.now() - sessionStartTime) / 1000);
-            const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
-            const ss = String(elapsed % 60).padStart(2, '0');
-            clockTime.textContent = `${mm}:${ss}`;
-        } else {
-            clockTime.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const seconds = String(elapsed % 60).padStart(2, '0');
+            clockTime.textContent = `${minutes}:${seconds}`;
+            return;
         }
+        clockTime.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }, 1000);
 
-    // Toast
-    const toastContainer = document.getElementById('toastContainer');
-    function showToast(msg, duration = 3000) {
-        const t = document.createElement('div');
-        t.className = 'toast'; t.textContent = msg;
-        toastContainer.appendChild(t);
-        setTimeout(() => t.remove(), duration);
-    }
+    bindSidebars();
+    bindControls();
+    observeNetwork();
 
-    // SIDEBAR LOGIC (NEW)
-    const chatSidebar = document.getElementById('chatSidebar');
-    const peopleSidebar = document.getElementById('peopleSidebar');
-    const detailsSidebar = document.getElementById('detailsSidebar');
-    const detailParams = document.getElementById('detailParams');
-    const chatInput = document.getElementById('chatInput');
-    const chatSendBtn = document.getElementById('chatSendBtn');
-    const chatList = document.getElementById('chatList');
-
-    window.closeAllSidebars = function() {
-        if(chatSidebar) chatSidebar.classList.remove('open');
-        if(peopleSidebar) peopleSidebar.classList.remove('open');
-        if(detailsSidebar) detailsSidebar.classList.remove('open');
-    }
-
-    // Interactive buttons
-    document.querySelectorAll('.interaction-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const action = btn.getAttribute('data-action');
-            if (action === 'Chat') {
-                window.closeAllSidebars();
-                chatSidebar.classList.add('open');
-            } else if (action === 'People') {
-                window.closeAllSidebars();
-                peopleSidebar.classList.add('open');
-            } else if (action === 'Meeting details') {
-                window.closeAllSidebars();
-                detailParams.innerHTML = `Role: <b style="color:#1a73e8">${selectedRole}</b><br>Company: <b style="color:#1a73e8">${selectedCompany}</b><br>Diff: <b style="color:#1a73e8">${selectedDifficulty}</b>`;
-                detailsSidebar.classList.add('open');
-            } else if (action) {
-                showToast(`"${action}" is unavailable early in the call.`);
-            }
-        });
-    });
-
-    // Chat Logic
-    if(chatInput) {
-        chatInput.addEventListener('input', () => { chatSendBtn.disabled = chatInput.value.trim() === ''; });
-        chatInput.addEventListener('keypress', (e) => { if(e.key === 'Enter') chatSendBtn.click(); });
-        chatSendBtn.addEventListener('click', () => {
-            const text = chatInput.value.trim();
-            if(!text) return;
-            const div = document.createElement('div');
-            div.className = 'chat-msg me';
-            const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-            div.innerHTML = `<div class="chat-name">You<span class="chat-time">${time}</span></div>${text}`;
-            chatList.appendChild(div);
-            // Scroll to bottom
-            chatList.scrollTop = chatList.scrollHeight;
-            
-            // Send to backend Gemini Model natively
-            sendJson({ type: "text", text: `(In chat) Candidate says: ${text}` });
-
-            chatInput.value = '';
-            chatSendBtn.disabled = true;
-        });
-    }
-
-    // ==========================================
-    // SETUP & JOIN
-    // ==========================================
     setupJoinBtn.addEventListener('click', async () => {
         selectedRole = document.getElementById('roleSelect').value;
         selectedCompany = document.getElementById('companySelect').value;
@@ -213,218 +175,336 @@ document.addEventListener('DOMContentLoaded', () => {
             audioPlayer = new window.AudioPlayer(audioContext);
             audioRecorder = new window.AudioRecorder(audioContext);
 
-            // Camera
-            const camOk = await camera.start();
-            if (camOk) {
+            const cameraReady = await camera.start();
+            if (cameraReady) {
                 document.getElementById('videoOverlay').style.display = 'none';
                 cameraBtn.classList.remove('disabled-state');
                 cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
-                camera.startFrameExtraction((b64) => {
-                    if (ws && ws.readyState === WebSocket.OPEN)
-                        sendJson({ type: "image", mimeType: "image/jpeg", data: b64 });
+                camera.startFrameExtraction(frame => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        sendJson({ type: 'image', mimeType: 'image/jpeg', data: frame });
+                    }
                 });
+            } else {
+                showToast('Camera unavailable. Continuing in audio-only mode.');
+                dashboard.setConnectionStatus('warning', 'Audio Only');
             }
 
-            // Visualizers
-            agentVis = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
-            userVis = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
-            agentVis.start(); userVis.start();
+            agentVisualizer = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
+            userVisualizer = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
+            agentVisualizer.start();
+            userVisualizer.start();
 
-            // Show meeting UI
             setupPanel.style.display = 'none';
             meetingMain.style.display = 'flex';
             bottomBar.style.display = 'flex';
+            sidebar.classList.remove('hidden');
 
-            // Set company badge
-            companyBadge.textContent = selectedCompany === 'general' ? 'General' : selectedCompany.charAt(0).toUpperCase() + selectedCompany.slice(1);
+            companyBadge.textContent = selectedCompany === 'general'
+                ? 'General'
+                : selectedCompany.charAt(0).toUpperCase() + selectedCompany.slice(1);
             meetingCode.textContent = `${selectedCompany}-${selectedDifficulty}-interview`;
 
-            // Connect WebSocket
             connectWebSocket();
-
-        } catch (e) {
-            console.error("Init error:", e);
-            showToast("Initialization error: " + e.message);
+        } catch (error) {
+            console.error('Initialization error:', error);
+            showToast(`Initialization error: ${error.message}`);
         }
     });
 
-    endBtn.addEventListener('click', () => {
-        if (!isActive) return;
-        sendJson({ type: "text", text: "I'd like to end the interview now. Please finalize and generate the session report." });
-        thinkingOverlay.style.display = 'block';
-        setTimeout(() => { cleanup(); showFeedbackPanel(); }, 4500);
-    });
+    function bindSidebars() {
+        const chatSidebar = document.getElementById('chatSidebar');
+        const peopleSidebar = document.getElementById('peopleSidebar');
+        const detailsSidebar = document.getElementById('detailsSidebar');
+        const detailParams = document.getElementById('detailParams');
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+        const chatList = document.getElementById('chatList');
 
-    micBtn.addEventListener('click', () => {
-        if (!audioRecorder) return;
-        const wasUnmuted = audioRecorder.toggleMute();
-        if (!wasUnmuted) {
-            micBtn.classList.add('disabled-state');
-            micBtn.innerHTML = '<span class="material-icons">mic_off</span>';
-            userMicIcon.textContent = 'mic_off';
-            showToast("Microphone muted");
-        } else {
-            micBtn.classList.remove('disabled-state');
-            micBtn.innerHTML = '<span class="material-icons">mic</span>';
-            userMicIcon.textContent = 'mic';
-            showToast("Microphone on");
+        document.querySelectorAll('.interaction-btn').forEach(button => {
+            button.addEventListener('click', () => {
+                const action = button.getAttribute('data-action');
+                window.closeAllSidebars();
+
+                if (action === 'Chat') {
+                    chatSidebar.classList.add('open');
+                    return;
+                }
+                if (action === 'People') {
+                    peopleSidebar.classList.add('open');
+                    return;
+                }
+                if (action === 'Meeting details') {
+                    detailParams.innerHTML = `Role: <b style="color:#1a73e8">${selectedRole}</b><br>Company: <b style="color:#1a73e8">${selectedCompany}</b><br>Diff: <b style="color:#1a73e8">${selectedDifficulty}</b>`;
+                    detailsSidebar.classList.add('open');
+                    return;
+                }
+                if (action === 'Live Analysis') {
+                    // Toggle the analytics sidebar
+                    const sidebar = document.getElementById('analyticsSidebar');
+                    if (sidebar) sidebar.classList.toggle('hidden');
+                    return;
+                }
+                if (action) {
+                    showToast(`"${action}" is unavailable early in the call.`);
+                }
+            });
+        });
+
+        if (!chatInput || !chatSendBtn || !chatList) return;
+        chatInput.addEventListener('input', () => {
+            chatSendBtn.disabled = chatInput.value.trim() === '';
+        });
+        chatInput.addEventListener('keypress', event => {
+            if (event.key === 'Enter') chatSendBtn.click();
+        });
+        chatSendBtn.addEventListener('click', () => {
+            const text = chatInput.value.trim();
+            if (!text) return;
+
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const node = document.createElement('div');
+            node.className = 'chat-msg me';
+            node.innerHTML = `<div class="chat-name">You<span class="chat-time">${time}</span></div>${text}`;
+            chatList.appendChild(node);
+            chatList.scrollTop = chatList.scrollHeight;
+
+            sendJson({ type: 'text', text: `(In chat) Candidate says: ${text}` });
+            chatInput.value = '';
+            chatSendBtn.disabled = true;
+        });
+    }
+
+    function bindControls() {
+        endBtn.addEventListener('click', () => {
+            if (!isActive) return;
+            manualClose = true;
+            sendJson({
+                type: 'text',
+                text: "I'd like to end the interview now. Please generate the session report.",
+            });
+            thinkingOverlay.style.display = 'block';
+            setTimeout(() => {
+                if (!finalReport.average_score) {
+                    cleanup();
+                    showFeedbackPanel();
+                }
+            }, 7000);
+        });
+
+        micBtn.addEventListener('click', () => {
+            if (!audioRecorder) return;
+            const isUnmuted = audioRecorder.toggleMute();
+            micBtn.classList.toggle('disabled-state', !isUnmuted);
+            micBtn.innerHTML = `<span class="material-icons">${isUnmuted ? 'mic' : 'mic_off'}</span>`;
+            userMicIcon.textContent = isUnmuted ? 'mic' : 'mic_off';
+            showToast(isUnmuted ? 'Microphone on' : 'Microphone muted');
+        });
+
+        cameraBtn.addEventListener('click', () => {
+            const enabled = camera.toggle();
+            cameraBtn.classList.toggle('disabled-state', !enabled);
+            cameraBtn.innerHTML = `<span class="material-icons">${enabled ? 'videocam' : 'videocam_off'}</span>`;
+            document.getElementById('videoOverlay').style.display = enabled ? 'none' : 'flex';
+            showToast(enabled ? 'Camera on' : 'Camera off');
+        });
+
+        ccBtn.addEventListener('click', () => {
+            ccEnabled = !ccEnabled;
+            ccBtn.classList.toggle('active', ccEnabled);
+            if (!ccEnabled) ccContainer.style.display = 'none';
+            showToast(ccEnabled ? 'Captions on' : 'Captions off');
+        });
+    }
+
+    function observeNetwork() {
+        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        const update = () => {
+            if (!connection) {
+                dashboard.setNetworkStatus('Network: Standard');
+                return;
+            }
+            const label = `Network: ${(connection.effectiveType || 'stable').toUpperCase()}`;
+            dashboard.setNetworkStatus(label);
+        };
+        update();
+        if (connection && connection.addEventListener) {
+            connection.addEventListener('change', update);
         }
-    });
+    }
 
-    cameraBtn.addEventListener('click', () => {
-        const on = camera.toggle();
-        if (on) {
-            cameraBtn.classList.remove('disabled-state');
-            cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
-            document.getElementById('videoOverlay').style.display = 'none';
-            showToast("Camera on");
-        } else {
-            cameraBtn.classList.add('disabled-state');
-            cameraBtn.innerHTML = '<span class="material-icons">videocam_off</span>';
-            document.getElementById('videoOverlay').style.display = 'flex';
-            showToast("Camera off");
-        }
-    });
-
-    ccBtn.addEventListener('click', () => {
-        ccEnabled = !ccEnabled;
-        ccBtn.classList.toggle('active', ccEnabled);
-        if (!ccEnabled) ccContainer.style.display = 'none';
-        showToast(ccEnabled ? "Captions on" : "Captions off");
-    });
-
-    // ==========================================
-    // WEBSOCKET
-    // ==========================================
     function connectWebSocket() {
+        clearTimeout(reconnectTimeout);
+        dashboard.setConnectionStatus('connecting', reconnectAttempts > 0 ? 'Reconnecting' : 'Connecting');
+
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${location.host}/ws/${userId}/${sessionId}?voice=${selectedVoice}`;
-        ws = new WebSocket(wsUrl);
+        const params = new URLSearchParams({
+            voice: selectedVoice,
+            role: selectedRole,
+            company: selectedCompany,
+            difficulty: selectedDifficulty,
+        });
+        ws = new WebSocket(`${protocol}//${location.host}/ws/${userId}/${sessionId}?${params}`);
 
         ws.onopen = async () => {
+            reconnectAttempts = 0;
             isActive = true;
-            sessionStartTime = Date.now();
+            sessionStartTime = sessionStartTime || Date.now();
+            dashboard.setConnectionStatus('live', 'Live');
             thinkingOverlay.style.display = 'block';
             ccBtn.disabled = false;
             ccBtn.classList.add('active');
-            micBtn.classList.remove('disabled-state');
-            micBtn.innerHTML = '<span class="material-icons">mic</span>';
-            userMicIcon.textContent = 'mic';
 
-            // Send greeting trigger — minimal delay for instant agent response
-            setTimeout(() => {
-                sendJson({ type: "text", text: "Hello, I have joined the meet." });
-            }, 200);
+            startHeartbeat();
 
-            // Start streaming mic audio
-            try {
-                await audioRecorder.start((pcmBuf) => {
-                    if (ws && ws.readyState === WebSocket.OPEN) ws.send(pcmBuf);
-                });
-            } catch (e) { console.error("Mic error:", e); }
-        };
+            if (!audioStarted && audioRecorder) {
+                try {
+                    await audioRecorder.start(buffer => {
+                        if (ws && ws.readyState === WebSocket.OPEN) ws.send(buffer);
+                    });
+                    audioStarted = true;
+                    micBtn.classList.remove('disabled-state');
+                    micBtn.innerHTML = '<span class="material-icons">mic</span>';
+                    userMicIcon.textContent = 'mic';
+                } catch (error) {
+                    console.error('Microphone error:', error);
+                    showToast('Microphone unavailable. Text prompts still work.');
+                }
+            }
 
-        ws.onmessage = (event) => {
-            if (typeof event.data === 'string') {
-                try { handleAdkEvent(JSON.parse(event.data)); } catch(e) {}
+            // The server sends the intro prompt after the Live API connects.
+            // We just show a waiting state here.
+            if (!hasSentIntroPrompt) {
+                hasSentIntroPrompt = true;
+                showToast('Connecting to AI interviewer...');
+            } else {
+                showToast('Connection restored. Resuming session.');
             }
         };
 
-        ws.onclose = () => { isActive = false; };
-        ws.onerror = (e) => console.error("WS error:", e);
+        ws.onmessage = event => {
+            if (typeof event.data !== 'string') return;
+            try {
+                handleAdkEvent(JSON.parse(event.data));
+            } catch (error) {
+                console.error('Event parse error:', error);
+            }
+        };
+
+        ws.onclose = () => {
+            stopHeartbeat();
+            isActive = false;
+            if (!manualClose) {
+                scheduleReconnect();
+            } else {
+                dashboard.setConnectionStatus('idle', 'Session Ended');
+            }
+        };
+
+        ws.onerror = error => {
+            console.error('WebSocket error:', error);
+            dashboard.setConnectionStatus('warning', 'Connection Issue');
+        };
     }
 
-    // ==========================================
-    // ADK EVENT HANDLER
-    // ==========================================
-    function handleAdkEvent(evt) {
-        // Find tools and audio inside parts
-        if (evt.content && evt.content.parts) {
+    function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatInterval = setInterval(() => {
+            sendJson({ type: 'ping' });
+        }, 15000);
+    }
+
+    function stopHeartbeat() {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+    }
+
+    function scheduleReconnect() {
+        reconnectAttempts += 1;
+        const delay = Math.min(10000, 1200 * reconnectAttempts);
+        dashboard.setConnectionStatus('warning', `Reconnecting ${reconnectAttempts}`);
+        showToast(`Connection dropped. Reconnecting in ${Math.round(delay / 1000)}s...`);
+        reconnectTimeout = setTimeout(connectWebSocket, delay);
+    }
+
+    function handleAdkEvent(event) {
+        if (event.type === 'pong') {
+            return;
+        }
+
+        if (event.type === 'live_ready') {
+            dashboard.setConnectionStatus('live', 'Live');
+            showToast('AI Interviewer connected. Interview starting...');
+            return;
+        }
+
+        if (event.type === 'server_error') {
+            const errStr = String(event.error);
+            showToast(`Server Error: ${errStr}`, 5000);
+            if (errStr.includes("403") || errStr.includes("400") || errStr.includes("API key")) {
+                manualClose = true; // Stop reconnecting if it's an auth/fatal error
+            }
+            return;
+        }
+
+        if (event.customToolResponse) {
+            processToolResult(event.customToolResponse);
+        }
+
+        if (event.content && event.content.parts) {
             thinkingOverlay.style.display = 'none';
             agentMicIcon.textContent = 'mic';
             agentMicIcon.classList.remove('red-icon');
 
-            for (const part of evt.content.parts) {
-                // Spoken text fragment
-                if (part.text) dialogueHistory.push(`[Coach Ace]: ${part.text}`);
-                
-                // Audio data
-                const inlineData = part.inlineData || part.inline_data;
-                if (inlineData && inlineData.data) {
-                    if (audioPlayer) audioPlayer.playBase64(inlineData.data);
+            for (const part of event.content.parts) {
+                if (part.text) {
+                    dialogueHistory.push(`[Coach Ace]: ${part.text}`);
                 }
 
-                // Tool Call Request (Agent wants to use a tool)
-                let fc = part.functionCall || part.function_call;
-                if (fc) processFunctionCall(fc);
+                const inlineData = part.inlineData || part.inline_data;
+                if (inlineData && inlineData.data && audioPlayer) {
+                    audioPlayer.playBase64(inlineData.data);
+                }
 
-                // Tool Call Response (Runner finished executing the tool locally)
-                let fr = part.functionResponse || part.function_response;
-                if (fr) {
-                    // Normalize the response object format if ADK nests it in {result: string}
-                    if (fr.response && fr.response.result && typeof fr.response.result === 'string') {
-                        fr.response = JSON.parse(fr.response.result);
+                const functionResponse = part.functionResponse || part.function_response;
+                if (functionResponse) {
+                    if (functionResponse.response && functionResponse.response.result && typeof functionResponse.response.result === 'string') {
+                        functionResponse.response = JSON.parse(functionResponse.response.result);
                     }
-                    processToolResult(fr);
+                    processToolResult(functionResponse);
                 }
             }
         }
 
-        // Intercept custom tool responses from our explicit ws_manager broadcast
-        if (evt.customToolResponse) {
-            processToolResult(evt.customToolResponse);
-        }
-
-        // Transcriptions (CC + History)
-        const inTrans = evt.inputTranscription || evt.input_transcription;
-        if (inTrans && inTrans.text && inTrans.text.trim()) {
-            const userText = inTrans.text.trim();
-            dialogueHistory.push(`[You]: ${userText}`);
+        const inputTranscript = event.inputTranscription || event.input_transcription;
+        if (inputTranscript && inputTranscript.text && inputTranscript.text.trim()) {
+            const text = inputTranscript.text.trim();
+            dialogueHistory.push(`[You]: ${text}`);
             thinkingOverlay.style.display = 'block';
-            showCC('You', 'Y', 'bg-green', userText);
-            pulseElena();
+            showCaptions('You', 'Y', 'bg-green', text);
+            pulseTranscription();
         }
 
-        const outTrans = evt.outputTranscription || evt.output_transcription;
-        if (outTrans && outTrans.text && outTrans.text.trim()) {
-            showCC('Coach Ace', 'C', 'bg-blue', outTrans.text.trim());
-            pulseElena();
+        const outputTranscript = event.outputTranscription || event.output_transcription;
+        if (outputTranscript && outputTranscript.text && outputTranscript.text.trim()) {
+            showCaptions('Coach Ace', 'C', 'bg-blue', outputTranscript.text.trim());
+            pulseTranscription();
         }
 
-        // Turn completion tracking
-        if (evt.turnComplete || evt.turn_complete || evt.interrupted) {
+        if (event.turnComplete || event.turn_complete || event.interrupted) {
             agentMicIcon.textContent = 'mic_off';
             agentMicIcon.classList.add('red-icon');
             thinkingOverlay.style.display = 'none';
-            if (evt.interrupted && audioPlayer) audioPlayer.stop();
+            if (event.interrupted && audioPlayer) audioPlayer.stop();
         }
     }
 
-    function processFunctionCall(fc) {
-        pulseElena();
-        console.log("Tool call:", fc.name, fc.args);
-    }
+    function processToolResult(result) {
+        if (!result || !result.response) return;
+        const data = typeof result.response === 'string' ? JSON.parse(result.response) : result.response;
+        const name = result.name;
 
-    function processToolResult(fr) {
-        if (!fr || !fr.response) return;
-        const data = typeof fr.response === 'string' ? JSON.parse(fr.response) : fr.response;
-        const name = fr.name;
-
-        if (name === 'save_session_feedback') {
-            updateMetric('mConfidence', 'bConfidence', data.confidence);
-            updateMetric('mClarity', 'bClarity', data.clarity);
-            updateMetric('mBody', 'bBody', data.body_language);
-            updateMetric('mStar', 'bStar', data.star_score);
-            finalScores = { ...finalScores, ...data };
-        }
-
-        if (name === 'detect_filler_words') {
-            totalFillers += (data.total_filler_words || 0);
-            document.getElementById('fillerCount').textContent = totalFillers;
-            const words = data.detected_fillers ? Object.keys(data.detected_fillers).join(', ') : '—';
-            document.getElementById('fillerWords').textContent = words || '—';
-            document.getElementById('fillerTip').textContent = data.coaching_tip || '';
-        }
+        dashboard.handleToolResult(name, data);
 
         if (name === 'analyze_body_language') {
             updateBodyIndicator('dotEye', 'lblEye', data.eye_contact);
@@ -433,32 +513,38 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (name === 'evaluate_star_method') {
-            const comps = data.components_present || {};
-            setStarBadge('sSituation', comps.situation);
-            setStarBadge('sTask', comps.task);
-            setStarBadge('sAction', comps.action);
-            setStarBadge('sResult', comps.result);
+            const components = data.components_present || {};
+            setStarBadge('sSituation', components.situation);
+            setStarBadge('sTask', components.task);
+            setStarBadge('sAction', components.action);
+            setStarBadge('sResult', components.result);
         }
 
         if (name === 'generate_session_report') {
-            finalScores = { ...finalScores, ...data };
+            finalReport = { ...finalReport, ...data };
+            dashboard.storeSessionSummary(finalReport);
+            cleanup();
+            if (manualClose && feedbackPanel.style.display !== 'flex') {
+                showFeedbackPanel();
+            }
         }
     }
 
-    // ==========================================
-    // UI HELPERS
-    // ==========================================
-    function sendJson(obj) {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    function sendJson(payload) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(payload));
+        }
     }
 
-    function pulseElena() {
+    function pulseTranscription() {
         transcribingBadge.style.display = 'flex';
         clearTimeout(ccTimeout);
-        ccTimeout = setTimeout(() => transcribingBadge.style.display = 'none', 3000);
+        ccTimeout = setTimeout(() => {
+            transcribingBadge.style.display = 'none';
+        }, 3000);
     }
 
-    function showCC(name, initial, colorClass, text) {
+    function showCaptions(name, initial, colorClass, text) {
         if (!ccEnabled) return;
         ccContainer.style.display = 'flex';
         ccName.textContent = name;
@@ -466,112 +552,108 @@ document.addEventListener('DOMContentLoaded', () => {
         ccAvatar.className = `cc-avatar ${colorClass}`;
         ccAvatar.textContent = initial;
         clearTimeout(ccTimeout);
-        ccTimeout = setTimeout(() => ccContainer.style.display = 'none', 6000);
+        ccTimeout = setTimeout(() => {
+            ccContainer.style.display = 'none';
+        }, 5000);
     }
 
-    function updateMetric(valId, barId, value) {
-        if (value === undefined || value === null) return;
-        document.getElementById(valId).textContent = value;
-        const bar = document.getElementById(barId);
-        if (bar) bar.style.width = `${value}%`;
-    }
-
-    function updateBodyIndicator(dotId, lblId, rating) {
+    function updateBodyIndicator(dotId, labelId, rating) {
         if (!rating) return;
         const dot = document.getElementById(dotId);
-        const lbl = document.getElementById(lblId);
-        lbl.textContent = rating;
-        dot.className = 'bi-dot ' + (['excellent', 'good', 'confident', 'natural', 'engaged'].includes(rating) ? 'good' : 'bad');
+        const label = document.getElementById(labelId);
+        if (label) label.textContent = rating;
+        if (dot) {
+            dot.className = `bi-dot ${['excellent', 'good', 'confident', 'engaged', 'natural'].includes(rating) ? 'good' : 'bad'}`;
+        }
     }
 
     function setStarBadge(id, isPresent) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        const badge = el.querySelector('.si-badge');
+        const element = document.getElementById(id);
+        if (!element) return;
+        const badge = element.querySelector('.si-badge');
         if (badge) {
             badge.className = `si-badge ${isPresent ? 'on' : 'off'}`;
         }
     }
 
     function showFeedbackPanel() {
-        // Reveal the analytics sidebar now that the interview is done
-        sidebarOpen = true;
-        sidebar.classList.remove('hidden');
+        feedbackPanel.style.display = 'flex';
 
-        const panel = document.getElementById('feedbackPanel');
-        panel.style.display = 'flex';
+        const overall = finalReport.average_score || finalReport.overall_score || 0;
+        document.getElementById('scoreOverall').textContent = overall;
+        document.getElementById('scoreConfidence').textContent = finalReport.confidence || 0;
+        document.getElementById('scoreClarity').textContent = finalReport.clarity || 0;
+        document.getElementById('scoreContent').textContent = finalReport.content || 0;
+        document.getElementById('scoreStar').textContent = finalReport.star_score || 0;
+        document.getElementById('scoreBody').textContent = finalReport.body_language || 0;
 
-        const scores = [
-            finalScores.confidence || 0,
-            finalScores.clarity || 0,
-            finalScores.body_language || 0,
-            finalScores.content || 0,
-            finalScores.star_score || 0,
-        ];
-        const ovr = finalScores.average_score || (scores.length ? Math.round(scores.reduce((a,b)=>a+b,0)/scores.length) : 0);
+        const tierBadge = document.getElementById('tierBadge');
+        tierBadge.innerHTML = `<span class="tier-pill">${finalReport.performance_tier || 'Session complete'}</span>`;
 
-        document.getElementById('scoreOverall').textContent = ovr;
-        document.getElementById('scoreConfidence').textContent = finalScores.confidence || 0;
-        document.getElementById('scoreClarity').textContent = finalScores.clarity || 0;
-        document.getElementById('scoreContent').textContent = finalScores.content || 0;
-        document.getElementById('scoreStar').textContent = finalScores.star_score || 0;
-        document.getElementById('scoreBody').textContent = finalScores.body_language || 0;
-
-        const tier = finalScores.performance_tier || (
-            ovr >= 85 ? 'Excellent - Interview Ready' :
-            ovr >= 70 ? 'Good - Minor Refinements Needed' :
-            ovr >= 55 ? 'Developing - Focused Practice Recommended' :
-            'Building Foundation - Keep Practicing'
-        );
-        document.getElementById('tierBadge').innerHTML = `<span class="tier-pill">${tier}</span>`;
-
-        let html = '';
-        if (finalScores.strengths) html += `<p><strong>Strengths:</strong> ${finalScores.strengths}</p><br>`;
-        if (finalScores.improvements) html += `<p><strong>Growth Areas:</strong> ${finalScores.improvements}</p><br>`;
-        if (totalFillers > 0) html += `<p><strong>Filler Words:</strong> ${totalFillers} total detected. ${totalFillers > 10 ? 'Practice pausing instead of filling.' : 'Good control overall.'}</p><br>`;
-        if (finalScores.recommendations) {
-            html += `<p><strong>Recommendations:</strong></p><ul style="margin-top:8px;padding-left:20px;">`;
-            for (const r of finalScores.recommendations) html += `<li>${r}</li>`;
-            html += `</ul>`;
+        const notes = [];
+        if (finalReport.strengths) notes.push(`<p><strong>Strengths:</strong> ${finalReport.strengths}</p>`);
+        if (finalReport.improvements) notes.push(`<p><strong>Growth Area:</strong> ${finalReport.improvements}</p>`);
+        if (Array.isArray(finalReport.study_plan) && finalReport.study_plan.length) {
+            notes.push(`<p><strong>Study Plan:</strong></p><ul>${finalReport.study_plan.map(item => `<li>${item}</li>`).join('')}</ul>`);
         }
-        document.getElementById('feedbackContent').innerHTML = html || '<p>Your interview data is ready. Download the transcript for a full breakdown.</p>';
+        document.getElementById('feedbackContent').innerHTML = notes.join('') || '<p>Session analytics have been saved.</p>';
 
-        const dlBtn = document.getElementById('downloadTranscriptBtn');
-        dlBtn.disabled = false;
-        dlBtn.onclick = downloadTranscript;
+        const downloadBtn = document.getElementById('downloadTranscriptBtn');
+        downloadBtn.disabled = false;
+        downloadBtn.onclick = downloadTranscript;
     }
 
     function downloadTranscript() {
         const lines = [
-            `INTERVIEWACE MOCK INTERVIEW TRANSCRIPT`,
+            'INTERVIEWACE MOCK INTERVIEW TRANSCRIPT',
             `Date: ${new Date().toLocaleDateString()}`,
-            `Company Style: ${selectedCompany}  |  Role: ${selectedRole}  |  Difficulty: ${selectedDifficulty}`,
-            `Overall Score: ${finalScores.average_score || document.getElementById('scoreOverall').textContent}`,
-            `Filler Words Detected: ${totalFillers}`,
-            ``,
-            `=== DIALOGUE ===`,
+            `Company Style: ${selectedCompany}`,
+            `Role: ${selectedRole}`,
+            `Difficulty: ${selectedDifficulty}`,
+            `Overall Score: ${finalReport.average_score || 0}`,
+            '',
+            '=== DIALOGUE ===',
             ...dialogueHistory,
         ];
         const blob = new Blob([lines.join('\n\n')], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `InterviewAce_Transcript_${new Date().toISOString().split('T')[0]}.txt`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `InterviewAce_Transcript_${new Date().toISOString().slice(0, 10)}.txt`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
         URL.revokeObjectURL(url);
     }
 
     function cleanup() {
+        manualClose = true;
         isActive = false;
-        // Save scores to localStorage so they survive reload
-        try { localStorage.setItem('ia_last_scores', JSON.stringify({...finalScores, totalFillers, selectedRole, selectedCompany, selectedDifficulty})); } catch(e) {}
+        stopHeartbeat();
+        clearTimeout(reconnectTimeout);
+        dashboard.storeSessionSummary(finalReport);
+
         if (audioRecorder) audioRecorder.stop();
         if (audioPlayer) audioPlayer.stop();
-        if (agentVis) agentVis.stop();
-        if (userVis) userVis.stop();
-        if (camera) camera.stop();
-        setTimeout(() => { if (ws) ws.close(); }, 1000);
+        if (agentVisualizer) agentVisualizer.stop();
+        if (userVisualizer) userVisualizer.stop();
+        camera.stop();
+
+        if (ws) {
+            try {
+                ws.close();
+            } catch (error) {
+                console.warn('Unable to close websocket cleanly', error);
+            }
+        }
+    }
+
+    function showToast(message, duration = 2600) {
+        const container = document.getElementById('toastContainer');
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), duration);
     }
 });

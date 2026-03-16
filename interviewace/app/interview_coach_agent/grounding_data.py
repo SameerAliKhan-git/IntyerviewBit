@@ -108,6 +108,34 @@ INTERVIEW_QUESTIONS = [
         "text": "You discover that a popular feature your team shipped has a security vulnerability. It would take 2 weeks to fix properly, but a quick patch exists. What's your approach?",
         "evaluation_criteria": "Look for: security awareness, communication plan, risk mitigation, decision framework"
     },
+    {
+        "role": "software_engineer",
+        "category": "technical",
+        "difficulty": "hard",
+        "text": "Walk me through a system you scaled significantly. What bottleneck broke first and how did you fix it?",
+        "evaluation_criteria": "Look for: system design depth, bottleneck analysis, trade-offs, measurable improvement"
+    },
+    {
+        "role": "product_manager",
+        "category": "situational",
+        "difficulty": "hard",
+        "text": "A flagship metric is dropping, but every stakeholder has a different theory. How would you drive the response in the first 48 hours?",
+        "evaluation_criteria": "Look for: prioritization, stakeholder alignment, experimentation plan, communication cadence"
+    },
+    {
+        "role": "data_scientist",
+        "category": "technical",
+        "difficulty": "hard",
+        "text": "Tell me about a model or analysis you put into production. How did you monitor whether it kept delivering value?",
+        "evaluation_criteria": "Look for: deployment pragmatism, evaluation strategy, drift awareness, business value"
+    },
+    {
+        "role": "general",
+        "category": "leadership",
+        "difficulty": "medium",
+        "text": "Tell me about a time you aligned a skeptical group around a difficult decision.",
+        "evaluation_criteria": "Look for: influence, empathy, communication, and execution follow-through"
+    },
 ]
 
 GROUNDING_KNOWLEDGE = {
@@ -157,6 +185,53 @@ GROUNDING_KNOWLEDGE = {
             "Negativity — Never badmouth previous employers or colleagues",
             "Not asking questions — Always prepare 2-3 thoughtful questions for the interviewer"
         ]
+    },
+    "company_interview_styles": {
+        "google": {
+            "values": ["Go deep", "Be helpful", "Learn fast", "Think at scale"],
+            "interview_focus": "Structured problem-solving, technical depth, collaboration, and impact",
+            "question_style": "Open-ended problem solving, systems thinking, and evidence-backed behavioral stories"
+        },
+        "amazon": {
+            "values": ["Customer obsession", "Ownership", "Dive deep", "Deliver results", "Learn and be curious"],
+            "interview_focus": "Leadership principles, ownership, metrics, and decision quality",
+            "question_style": "Past examples with concrete actions, trade-offs, and measurable outcomes"
+        },
+        "meta": {
+            "values": ["Move fast", "Focus on impact", "Build awesome things", "Be open"],
+            "interview_focus": "Execution speed, learning velocity, influence, and product instincts",
+            "question_style": "Rapid iteration stories, prioritization, and ambiguous problem solving"
+        },
+        "apple": {
+            "values": ["Craft", "Detail", "Cross-functional excellence", "User trust"],
+            "interview_focus": "Quality bar, product taste, deep ownership, and detail orientation",
+            "question_style": "Stories about standards, difficult judgment calls, and end-user impact"
+        },
+        "microsoft": {
+            "growth_mindset": "Embrace a growth mindset, learn from failures, continuous improvement",
+            "interview_focus": "Technical excellence, collaboration, customer success",
+            "question_style": "Problem-solving with data, teamwork scenarios, customer impact stories"
+        },
+        "netflix": {
+            "culture": ["Judgement", "Communication", "Impact", "Curiosity", "Innovation", "Courage", "Passion", "Honesty", "Selflessness"],
+            "interview_focus": "High performance, innovation, cultural fit",
+            "question_style": "Context-heavy questions about past experiences, focus on impact and learning"
+        },
+        "airbnb": {
+            "values": ["Champion the mission", "Be a host", "Embrace the adventure", "Be a cereal entrepreneur"],
+            "interview_focus": "Belonging, community building, entrepreneurial spirit",
+            "question_style": "Stories about creating belonging, handling diverse perspectives, rapid growth"
+        },
+        "stripe": {
+            "values": ["Be intellectually curious", "Build with heart", "Default to open", "Be deliberate"],
+            "interview_focus": "Technical depth, product thinking, scaling challenges",
+            "question_style": "Deep technical questions, system design, product strategy discussions"
+        },
+        "uber": {
+            "values": ["We build globally, we live locally", "We are customer obsessed", "We celebrate differences", "We do the right thing", "We take ownership", "We persevere"],
+            "interview_focus": "Global scale, customer impact, ownership mindset",
+            "question_style": "Scale challenges, customer problem-solving, ownership stories"
+        }
     }
 }
 

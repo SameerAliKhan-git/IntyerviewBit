@@ -11,10 +11,12 @@ class CameraManager {
         this.stream = null;
         this.isRecording = false;
         
-        // Target 1 frame per second for body language analysis
-        this.frameIntervalMs = 1000; 
+        // Adaptive frame rate based on bandwidth/connection
+        this.frameIntervalMs = 1000; // Default 1 fps
         this.frameIntervalId = null;
         this.onFrameCaptured = null; // Callback for app.js
+        this.bandwidthCheckInterval = null;
+        this.lowBandwidthMode = false;
     }
 
     async start() {
@@ -40,6 +42,9 @@ class CameraManager {
                 };
             });
             
+            // Start bandwidth monitoring
+            this.startBandwidthMonitoring();
+            
             console.log("📷 Camera started successfully");
             return true;
         } catch (error) {
@@ -55,6 +60,66 @@ class CameraManager {
             if (this.videoElement) this.videoElement.srcObject = null;
         }
         this.stopFrameExtraction();
+        this.stopBandwidthMonitoring();
+    }
+
+    startBandwidthMonitoring() {
+        // Check connection every 30 seconds
+        this.bandwidthCheckInterval = setInterval(() => {
+            this.checkBandwidthAndAdapt();
+        }, 30000);
+    }
+
+    stopBandwidthMonitoring() {
+        if (this.bandwidthCheckInterval) {
+            clearInterval(this.bandwidthCheckInterval);
+            this.bandwidthCheckInterval = null;
+        }
+    }
+
+    async checkBandwidthAndAdapt() {
+        try {
+            // Simple bandwidth estimation using navigator.connection if available
+            const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+            
+            if (connection) {
+                const effectiveType = connection.effectiveType; // 'slow-2g', '2g', '3g', '4g'
+                const downlink = connection.downlink; // Mbps
+                
+                // Adapt frame rate based on connection
+                if (effectiveType === 'slow-2g' || effectiveType === '2g' || downlink < 1) {
+                    if (!this.lowBandwidthMode) {
+                        this.lowBandwidthMode = true;
+                        this.frameIntervalMs = 3000; // 0.33 fps
+                        console.log("📶 Low bandwidth detected, reducing frame rate to 0.33 fps");
+                        this.restartFrameExtraction();
+                    }
+                } else if (effectiveType === '3g' || downlink < 5) {
+                    if (!this.lowBandwidthMode) {
+                        this.lowBandwidthMode = true;
+                        this.frameIntervalMs = 2000; // 0.5 fps
+                        console.log("📶 Moderate bandwidth, reducing frame rate to 0.5 fps");
+                        this.restartFrameExtraction();
+                    }
+                } else {
+                    if (this.lowBandwidthMode) {
+                        this.lowBandwidthMode = false;
+                        this.frameIntervalMs = 1000; // 1 fps
+                        console.log("📶 Good bandwidth, using normal 1 fps");
+                        this.restartFrameExtraction();
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn("Bandwidth check failed:", error);
+        }
+    }
+
+    restartFrameExtraction() {
+        if (this.isRecording) {
+            this.stopFrameExtraction();
+            this.startFrameExtraction(this.onFrameCaptured);
+        }
     }
 
     startFrameExtraction(callback) {

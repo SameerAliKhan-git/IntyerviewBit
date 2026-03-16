@@ -42,7 +42,7 @@ gcloud run deploy $SERVICE_NAME \
   --region $REGION \
   --platform managed \
   --allow-unauthenticated \
-  --set-env-vars="AGENT_MODEL=gemini-2.5-flash-native-audio-preview"
+  --set-env-vars="AGENT_MODEL=gemini-2.5-flash-native-audio-preview-12-2025"
 
 echo "✅ Deployment complete!"
 echo "Your InterviewAce AI Coach is now live on Google Cloud Platform."

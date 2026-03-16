@@ -9,7 +9,7 @@ class AudioRecorder {
         this.processor = null;
         this.source = null;
         this.isMuted = false;
-        
+
         this.analyser = this.context.createAnalyser();
         this.analyser.fftSize = 256;
     }
@@ -30,12 +30,13 @@ class AudioRecorder {
             });
 
             this.source = this.context.createMediaStreamSource(this.stream);
-            
+
             // Connect to visualizer analyser
             this.source.connect(this.analyser);
 
+            // Buffer size of 4096 samples is required to prevent "1007 Request contains an invalid argument" API limits from Gemini
             this.processor = this.context.createScriptProcessor(4096, 1, 1);
-            
+
             this.processor.onaudioprocess = (e) => {
                 if (this.isMuted) return;
 

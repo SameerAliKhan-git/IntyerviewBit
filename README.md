@@ -26,12 +26,13 @@ Practicing for technical interviews is one of the most stressful parts of a job 
 | Feature | How It Works |
 |---------|-------------|
 | 🗣️ **Native Audio Voice** | Real-time bidirectional audio via Gemini 2.5 Flash Native Audio. Sub-500ms latency. Supports natural interruptions and barge-in. |
-| 👀 **Live Camera Vision** | Webcam frames streamed at 1 fps to Gemini's vision model for real-time body language analysis (posture, eye contact, expression). |
-| 📊 **11 ADK Background Tools** | Silent analysis tools fire automatically during the interview — filler word detection, STAR method evaluation, voice confidence, and more. |
-| 🔍 **Google Search Grounding** | ADK's built-in `google_search` tool prevents hallucination of company interview facts. |
-| 🏢 **Company-Specific Styles** | Google, Amazon (Leadership Principles), Meta, and Apple interview question frameworks. |
+| 👀 **Live Camera Vision** | Webcam frames streamed at adaptive 0.33-1 fps for real-time body language analysis (posture, eye contact, expression, gestures). Bandwidth-adaptive. |
+| 📊 **13 ADK Background Tools** | Silent analysis tools fire automatically during the interview — filler word detection, STAR method evaluation, voice confidence (pace/volume/tone/pauses), body language (gestures/expressions), and dynamic difficulty scaling. |
+| 🔍 **Google Search Grounding** | ADK's built-in `google_search` tool prevents hallucination of company interview facts. Expanded grounding for 8+ companies. |
+| 🏢 **Company-Specific Styles** | Google, Amazon (Leadership Principles), Meta, Apple, Microsoft, Netflix, Airbnb, Stripe, Uber interview question frameworks. |
 | 📝 **Session Report & Transcript** | Full performance breakdown with downloadable transcript after every session. |
 | 🎨 **Google Meet Replica UI** | Pixel-perfect Meet interface with closed captions, volume visualizers, participant panel, chat sidebar, and session timer. |
+| ⚡ **Adaptive Performance** | Dynamic difficulty scaling based on candidate performance. Bandwidth-adaptive video streaming. Robust interruption handling. |
 
 ---
 
@@ -127,7 +128,7 @@ Coach Ace is a single **ADK `Agent`** with a carefully engineered persona — a 
 | Tier | Tools | Purpose |
 |------|-------|---------|
 | **Tier 1** | `save_session_feedback`, `detect_filler_words`, `analyze_body_language`, `evaluate_star_method` | Core real-time analysis — fires every 2-3 answers |
-| **Tier 2** | `analyze_voice_confidence`, `get_improvement_tips`, `fetch_grounding_data` | Deeper coaching — voice pace/volume analysis, targeted tips, verified knowledge base |
+| **Tier 2** | `analyze_voice_confidence`, `get_improvement_tips`, `fetch_grounding_data`, `adjust_difficulty_level` | Deeper coaching — voice/tone/pause analysis, targeted tips, verified knowledge base, dynamic scaling |
 | **Tier 3** | `get_session_history`, `save_session_recording`, `generate_session_report` | Session management and comprehensive reporting |
 | **Grounding** | `google_search` (ADK built-in) | Prevents hallucination of company-specific interview facts |
 

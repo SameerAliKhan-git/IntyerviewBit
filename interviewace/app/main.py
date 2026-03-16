@@ -1,28 +1,22 @@
-"""
-InterviewAce — Main FastAPI Application with WebSocket Handler.
-Implements the ADK Gemini Live API Toolkit bidirectional streaming pattern
-for real-time voice + video interview coaching.
+"""InterviewAce FastAPI application and Gemini Live WebSocket bridge."""
 
-Architecture follows the official ADK bidi-demo pattern exactly:
-  1. Application Initialization: Agent, SessionService, Runner at startup
-  2. Session Initialization: Session, RunConfig, LiveRequestQueue per connection
-  3. Bidirectional Streaming: Concurrent upstream/downstream async tasks
-  4. Graceful Termination: Proper cleanup of resources
-"""
+from __future__ import annotations
 
 import asyncio
 import base64
 import json
 import logging
+import os
 import warnings
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file BEFORE importing agent
+# Load from project root first, then app/.env as fallback
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
+load_dotenv(Path(__file__).parent / ".env", override=False)
 
-# pylint: disable=wrong-import-position
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
@@ -32,243 +26,301 @@ from google.adk.runners import Runner  # noqa: E402
 from google.adk.sessions import InMemorySessionService  # noqa: E402
 from google.genai import types  # noqa: E402
 
-from interview_coach_agent.agent import root_agent  # noqa: E402
-from ws_manager import register_ws, unregister_ws  # noqa: E402
+try:  # noqa: E402
+    from .interview_coach_agent.agent import root_agent
+    from .interview_coach_agent.tools import get_session_dashboard, get_session_history
+    from .runtime_config import get_model_profile
+    from .ws_manager import register_ws, unregister_ws
+except ImportError:  # pragma: no cover - supports running from app/ directly
+    from interview_coach_agent.agent import root_agent  # type: ignore
+    from interview_coach_agent.tools import get_session_dashboard, get_session_history  # type: ignore
+    from runtime_config import get_model_profile  # type: ignore
+    from ws_manager import register_ws, unregister_ws  # type: ignore
 
-# Configure logging
+
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# Suppress Pydantic serialization warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
 
-# Application name constant
 APP_NAME = "interviewace"
+MODEL_PROFILE = get_model_profile(root_agent.model)
 
-# ========================================
-app = FastAPI(title="InterviewAce", version="1.0.0")
-
-# Mount static files
+app = FastAPI(title="InterviewAce", version="1.1.0")
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
-# Define your session service
 session_service = InMemorySessionService()
-
-# Define your runner
 runner = Runner(app_name=APP_NAME, agent=root_agent, session_service=session_service)
 
 
-# ========================================
+def build_run_config(voice: str) -> RunConfig:
+    """Builds a model-aware ADK run configuration."""
+
+    common_args: dict[str, Any] = {
+        "streaming_mode": StreamingMode.BIDI,
+        "session_resumption": types.SessionResumptionConfig(),
+    }
+
+    if MODEL_PROFILE.supports_audio_output:
+        return RunConfig(
+            response_modalities=["AUDIO"],
+            input_audio_transcription=types.AudioTranscriptionConfig(),
+            output_audio_transcription=types.AudioTranscriptionConfig(),
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+                )
+            ),
+            **common_args,
+        )
+
+    return RunConfig(
+        response_modalities=["TEXT"],
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=None,
+        **common_args,
+    )
+
+
 @app.get("/")
 async def root():
-    """Serve the index.html page."""
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    """Serves the main web app."""
+
+    return FileResponse(static_dir / "index.html")
 
 
 @app.get("/health")
 async def health():
-    """Health check for Cloud Run."""
-    return {"status": "healthy", "agent": root_agent.name, "model": root_agent.model}
+    """Cloud Run health check endpoint."""
 
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    """Serve favicon to eliminate 404 console errors."""
-    favicon_path = Path(__file__).parent / "static" / "favicon.ico"
-    if favicon_path.exists():
-        return FileResponse(favicon_path, media_type="image/x-icon")
-    return FileResponse(Path(__file__).parent / "static" / "index.html")
+    return {
+        "status": "healthy",
+        "agent": root_agent.name,
+        "model": MODEL_PROFILE.name,
+        "mode": MODEL_PROFILE.mode,
+        "audio_output": MODEL_PROFILE.supports_audio_output,
+    }
 
 
 @app.get("/debug")
 async def debug():
-    """Debug endpoint — check if environment is configured correctly."""
-    import os
+    """Returns runtime diagnostics helpful during hackathon demos."""
+
     api_key = os.getenv("GOOGLE_API_KEY", "")
     return {
         "api_key_set": bool(api_key),
         "api_key_length": len(api_key),
         "api_key_prefix": api_key[:8] + "..." if len(api_key) > 8 else "MISSING",
-        "model": root_agent.model,
         "agent": root_agent.name,
+        "model": MODEL_PROFILE.name,
+        "mode": MODEL_PROFILE.mode,
+        "audio_output": MODEL_PROFILE.supports_audio_output,
         "tools_count": len(root_agent.tools) if root_agent.tools else 0,
-        "k_service": os.getenv("K_SERVICE", "not_set"),
         "vertexai": os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "not_set"),
+        "active_sessions": len(getattr(session_service, "_sessions", {})),
     }
 
 
-# ========================================
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Serves the favicon without generating a noisy 404."""
+
+    icon_path = static_dir / "favicon.ico"
+    if icon_path.exists():
+        return FileResponse(icon_path, media_type="image/x-icon")
+    return FileResponse(static_dir / "index.html")
+
+
+@app.get("/api/sessions/{session_id}/analytics")
+async def session_analytics(session_id: str):
+    """Exposes the live analytics snapshot for the frontend and tests."""
+
+    return get_session_dashboard(session_id)
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def session_history(session_id: str):
+    """Returns the full backend history payload for a session."""
+
+    return get_session_history(session_id)
+
+
 @app.websocket("/ws/{user_id}/{session_id}")
 async def websocket_endpoint(
     websocket: WebSocket,
     user_id: str,
     session_id: str,
     voice: str = "Kore",
+    role: str = "general",
+    company: str = "general",
+    difficulty: str = "medium",
 ) -> None:
-    """WebSocket endpoint for bidirectional streaming with ADK.
+    """Handles bidirectional Gemini Live streaming over WebSockets."""
 
-    This follows the EXACT official ADK bidi-demo pattern.
-    Accepts a 'voice' query parameter for selecting the agent's voice.
-    """
     logger.info(
-        f"WebSocket connection: user={user_id}, session={session_id}, voice={voice}"
+        "WebSocket connection: user=%s session=%s voice=%s model=%s",
+        user_id,
+        session_id,
+        voice,
+        MODEL_PROFILE.name,
     )
-    try:
-        await websocket.accept()
-        register_ws(session_id, websocket)
-    except Exception as e:
-        logger.error(f"Failed to accept WebSocket: {e}")
-        return
-    logger.info("WebSocket connection accepted")
 
-    # ========================================
-    # Phase 2: Session Initialization
-    # ========================================
+    live_request_queue = LiveRequestQueue()
+    live_ready = asyncio.Event()
+    await websocket.accept()
+    register_ws(session_id, websocket)
 
-    model_name = root_agent.model or ""
-    is_native_audio = "native-audio" in model_name.lower() or "gemini-2" in model_name.lower() or "gemini-live" in model_name.lower()
-
-    if is_native_audio:
-        run_config = RunConfig(
-            streaming_mode=StreamingMode.BIDI,
-            response_modalities=["AUDIO"],
-            input_audio_transcription=types.AudioTranscriptionConfig(),
-            output_audio_transcription=types.AudioTranscriptionConfig(),
-            session_resumption=types.SessionResumptionConfig(),
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name=voice
-                    )
-                )
-            ),
-        )
-        logger.info(f"Native audio model: {model_name}, voice={voice}, AUDIO modality")
-    else:
-        run_config = RunConfig(
-            streaming_mode=StreamingMode.BIDI,
-            response_modalities=["TEXT"],
-            input_audio_transcription=None,
-            output_audio_transcription=None,
-            session_resumption=types.SessionResumptionConfig(),
-        )
-        logger.info(f"Half-cascade model detected: {model_name}, using TEXT modality")
-
-    # Get or create session
+    run_config = build_run_config(voice)
     session = await session_service.get_session(
-        app_name=APP_NAME, user_id=user_id, session_id=session_id
+        app_name=APP_NAME,
+        user_id=user_id,
+        session_id=session_id,
     )
     if not session:
         await session_service.create_session(
-            app_name=APP_NAME, user_id=user_id, session_id=session_id
+            app_name=APP_NAME,
+            user_id=user_id,
+            session_id=session_id,
         )
-        logger.info(f"Created new session: {session_id}")
-
-    live_request_queue = LiveRequestQueue()
-
-    # ========================================
-    # Phase 3: Active Session (concurrent bidirectional communication)
-    # ========================================
 
     async def upstream_task() -> None:
-        """Receives messages from WebSocket and sends to LiveRequestQueue."""
-        logger.debug("upstream_task started")
         while True:
             message = await websocket.receive()
+            event_type = message.get("type")
 
-            # Handle binary frames (audio data)
-            if "bytes" in message:
-                audio_data = message["bytes"]
-                logger.debug(f"Received binary audio chunk: {len(audio_data)} bytes")
+            if event_type == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+
+            if message.get("bytes"):
                 audio_blob = types.Blob(
-                    mime_type="audio/pcm;rate=16000", data=audio_data
+                    mime_type="audio/pcm;rate=16000",
+                    data=message["bytes"],
                 )
                 live_request_queue.send_realtime(audio_blob)
+                continue
 
-            # Handle text frames (JSON messages)
-            elif "text" in message:
-                text_data = message["text"]
-                logger.debug(f"Received text message: {text_data[:100]}...")
+            text_data = message.get("text")
+            if not text_data:
+                continue
 
-                json_message = json.loads(text_data)
+            try:
+                payload = json.loads(text_data)
+            except json.JSONDecodeError:
+                logger.warning("Ignoring malformed JSON payload for session %s", session_id)
+                continue
 
-                # Extract text from JSON and send to LiveRequestQueue
-                if json_message.get("type") == "text":
-                    logger.debug(f"Sending text content: {json_message['text']}")
-                    content = types.Content(
-                        parts=[types.Part(text=json_message["text"])]
-                    )
-                    live_request_queue.send_content(content)
+            payload_type = payload.get("type")
+            if payload_type == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+                continue
 
-                # Handle image data
-                elif json_message.get("type") == "image":
-                    logger.debug("Received image data")
-                    image_data = base64.b64decode(json_message["data"])
-                    mime_type = json_message.get("mimeType", "image/jpeg")
-                    logger.debug(
-                        f"Sending image: {len(image_data)} bytes, type: {mime_type}"
-                    )
-                    image_blob = types.Blob(mime_type=mime_type, data=image_data)
-                    live_request_queue.send_realtime(image_blob)
+            if payload_type == "text":
+                content = types.Content(parts=[types.Part(text=payload.get("text", ""))])
+                live_request_queue.send_content(content)
+                continue
+
+            if payload_type == "image":
+                try:
+                    image_data = base64.b64decode(payload["data"])
+                except Exception:
+                    logger.warning("Ignoring malformed image payload for session %s", session_id)
+                    continue
+                image_blob = types.Blob(
+                    mime_type=payload.get("mimeType", "image/jpeg"),
+                    data=image_data,
+                )
+                live_request_queue.send_realtime(image_blob)
+                continue
+
+            logger.debug("Ignoring unsupported payload type %s", payload_type)
 
     async def downstream_task() -> None:
-        """Receives Events from run_live() and sends to WebSocket."""
-        logger.debug("downstream_task started, calling runner.run_live()")
+        first_event = True
         async for event in runner.run_live(
             user_id=user_id,
             session_id=session_id,
             live_request_queue=live_request_queue,
             run_config=run_config,
         ):
-            event_json = event.model_dump_json(exclude_none=True, by_alias=True)
-            logger.debug(f"[SERVER] Event: {event_json[:200]}")
-            await websocket.send_text(event_json)
-        logger.debug("run_live() generator completed")
+            if first_event:
+                first_event = False
+                live_ready.set()
+            await websocket.send_text(event.model_dump_json(exclude_none=True, by_alias=True))
 
-    # Run both tasks concurrently
-    try:
-        logger.debug("Starting asyncio.gather for upstream and downstream tasks")
-        await asyncio.gather(upstream_task(), downstream_task())
-        logger.debug("asyncio.gather completed normally")
-    except WebSocketDisconnect:
-        logger.info("Client disconnected normally")
-    except Exception as e:
-        logger.error(f"Unexpected error in streaming tasks: {e}", exc_info=True)
-        # Try to send error back to client for debugging
+    async def send_intro_when_ready() -> None:
+        """Waits for the Live API to be connected, then sends the greeting."""
+        # Give the Live connection up to 15 seconds to establish
         try:
-            error_msg = json.dumps({"error": str(e), "type": "server_error"})
-            await websocket.send_text(error_msg)
+            await asyncio.wait_for(live_ready.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            pass
+        # Small grace period after first event
+        await asyncio.sleep(0.5)
+        # Always send the intro prompt server-side so it never races
+        company_label = company if company != "general" else "general tech"
+        role_label = role.replace("_", " ")
+        intro = (
+            f"Hello, I have joined the interview. "
+            f"I want a {difficulty} {company_label} interview for a {role_label} role."
+        )
+        logger.info("Sending server-side intro prompt for session %s", session_id)
+        content = types.Content(parts=[types.Part(text=intro)])
+        live_request_queue.send_content(content)
+        # Signal the frontend that we are live
+        try:
+            await websocket.send_text(json.dumps({"type": "live_ready"}))
+        except Exception:
+            pass
+
+    upstream = asyncio.create_task(upstream_task(), name=f"upstream-{session_id}")
+    downstream = asyncio.create_task(downstream_task(), name=f"downstream-{session_id}")
+    intro_task = asyncio.create_task(send_intro_when_ready(), name=f"intro-{session_id}")
+
+    try:
+        done, pending = await asyncio.wait(
+            {upstream, downstream},
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+
+        for task in done:
+            exc = task.exception()
+            if exc:
+                raise exc
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected for session %s", session_id)
+    except Exception as exc:
+        logger.exception("Streaming error for session %s: %s", session_id, exc)
+        try:
+            await websocket.send_text(
+                json.dumps({"type": "server_error", "error": str(exc)})
+            )
         except Exception:
             pass
     finally:
-        # ========================================
-        # Phase 4: Session Termination
-        # ========================================
-        logger.info("Closing live_request_queue")
+        for task in (upstream, downstream, intro_task):
+            if not task.done():
+                task.cancel()
         unregister_ws(session_id)
         live_request_queue.close()
 
 
-# ========================================
-# Run with Uvicorn
-# ========================================
 if __name__ == "__main__":
-    import os
     import uvicorn
 
     port = int(os.getenv("PORT", 8080))
     is_cloud = os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN", "")
 
-    print("="*60)
+    print("=" * 60)
     print("  InterviewAce - AI Interview Coach")
-    print("  Built with Google ADK & Gemini Live API")
-    print("="*60)
+    print("  Built with Google ADK and Gemini Live API")
+    print("=" * 60)
     print(f"  Agent: {root_agent.name}")
-    print(f"  Model: {root_agent.model}")
+    print(f"  Model: {MODEL_PROFILE.name}")
+    print(f"  Mode: {MODEL_PROFILE.mode}")
     print(f"  Environment: {'Cloud Run' if is_cloud else 'Local'}")
     print("=" * 60)
 
@@ -276,9 +328,9 @@ if __name__ == "__main__":
         "app.main:app" if is_cloud else "main:app",
         host="0.0.0.0",
         port=port,
-        reload=not is_cloud,
+        reload=not bool(is_cloud),
         log_level="info",
-        ws_max_size=16 * 1024 * 1024,  # 16MB for audio + image frames
+        ws_max_size=16 * 1024 * 1024,
         timeout_keep_alive=300,
     )
-
+    # force reload to load new env vars 

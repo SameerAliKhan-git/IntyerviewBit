@@ -31,7 +31,7 @@ resource "google_cloud_run_v2_service" "interviewace" {
       
       env {
         name  = "AGENT_MODEL"
-        value = "gemini-2.5-flash-native-audio-preview"
+        value = "gemini-live-2.5-flash-native-audio"
       }
       
       env {

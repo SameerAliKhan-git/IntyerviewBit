@@ -9,3 +9,5 @@ test_key.py
 test_bidi.py
 test_client.py
 list_models.py
+stdout.log
+.venv/
