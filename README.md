@@ -3,6 +3,14 @@
 > **Gemini Live Agent Challenge** | Category: **Live Agents 🗣️**
 >
 > 🔗 **[Live Demo](https://interviewace-117780891544.us-central1.run.app/)** ·🏗️ **[Architecture]([#architechture)**
+>
+>
+> ### **[Proof_of_GCP_Deployement]**
+> https://github.com/user-attachments/assets/04eed382-ea8f-4053-b079-65efb8129cbf
+ 
+
+
+
 
 ---
 
