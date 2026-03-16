@@ -240,9 +240,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 if (action === 'Live Analysis') {
-                    // Toggle the analytics sidebar
                     const sidebar = document.getElementById('analyticsSidebar');
-                    if (sidebar) sidebar.classList.toggle('hidden');
+                    if (sidebar) {
+                        sidebar.classList.toggle('hidden');
+                        button.classList.toggle('active', !sidebar.classList.contains('hidden'));
+                    }
                     return;
                 }
                 if (action) {
@@ -391,10 +393,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
             stopHeartbeat();
             isActive = false;
             if (!manualClose) {
+                console.warn('WebSocket closed unexpectedly:', event.code, event.reason);
                 scheduleReconnect();
             } else {
                 dashboard.setConnectionStatus('idle', 'Session Ended');
@@ -402,7 +405,7 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         ws.onerror = error => {
-            console.error('WebSocket error:', error);
+            console.warn('WebSocket transport error (will auto-reconnect):', error);
             dashboard.setConnectionStatus('warning', 'Connection Issue');
         };
     }
@@ -439,10 +442,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (event.type === 'server_error') {
-            const errStr = String(event.error);
-            showToast(`Server Error: ${errStr}`, 5000);
-            if (errStr.includes("403") || errStr.includes("400") || errStr.includes("API key")) {
-                manualClose = true; // Stop reconnecting if it's an auth/fatal error
+            const errStr = String(event.error || 'Unknown error');
+            console.warn('Server error event:', errStr);
+            // Only show toast for non-spammy errors
+            if (errStr.includes('1007') || errStr.includes('1008') || errStr.includes('invalid argument')) {
+                showToast('AI connection interrupted. Reconnecting...', 3000);
+                // Don't set manualClose — let it auto-reconnect
+            } else if (errStr.includes('403') || errStr.includes('400') || errStr.includes('API key')) {
+                showToast(`Fatal Error: ${errStr}`, 8000);
+                manualClose = true;
+            } else {
+                showToast(`Server Error: ${errStr.substring(0, 80)}`, 4000);
             }
             return;
         }
@@ -580,23 +590,156 @@ document.addEventListener('DOMContentLoaded', () => {
         feedbackPanel.style.display = 'flex';
 
         const overall = finalReport.average_score || finalReport.overall_score || 0;
+        const conf = finalReport.confidence || 0;
+        const clar = finalReport.clarity || 0;
+        const cont = finalReport.content || 0;
+        const star = finalReport.star_score || 0;
+        const body = finalReport.body_language || 0;
+
         document.getElementById('scoreOverall').textContent = overall;
-        document.getElementById('scoreConfidence').textContent = finalReport.confidence || 0;
-        document.getElementById('scoreClarity').textContent = finalReport.clarity || 0;
-        document.getElementById('scoreContent').textContent = finalReport.content || 0;
-        document.getElementById('scoreStar').textContent = finalReport.star_score || 0;
-        document.getElementById('scoreBody').textContent = finalReport.body_language || 0;
+        document.getElementById('scoreConfidence').textContent = conf;
+        document.getElementById('scoreClarity').textContent = clar;
+        document.getElementById('scoreContent').textContent = cont;
+        document.getElementById('scoreStar').textContent = star;
+        document.getElementById('scoreBody').textContent = body;
 
         const tierBadge = document.getElementById('tierBadge');
         tierBadge.innerHTML = `<span class="tier-pill">${finalReport.performance_tier || 'Session complete'}</span>`;
 
-        const notes = [];
-        if (finalReport.strengths) notes.push(`<p><strong>Strengths:</strong> ${finalReport.strengths}</p>`);
-        if (finalReport.improvements) notes.push(`<p><strong>Growth Area:</strong> ${finalReport.improvements}</p>`);
-        if (Array.isArray(finalReport.study_plan) && finalReport.study_plan.length) {
-            notes.push(`<p><strong>Study Plan:</strong></p><ul>${finalReport.study_plan.map(item => `<li>${item}</li>`).join('')}</ul>`);
+        // Build rich feedback content with visualizations
+        const sections = [];
+
+        // --- 1. Bar Chart: Score Breakdown ---
+        const scores = [
+            { label: 'Confidence', value: conf, color: '#4285f4' },
+            { label: 'Clarity', value: clar, color: '#34a853' },
+            { label: 'Content', value: cont, color: '#ea4335' },
+            { label: 'STAR', value: star, color: '#fbbc05' },
+            { label: 'Body Lang.', value: body, color: '#a142f4' },
+        ];
+        const barChartHTML = `
+            <div class="fb-section">
+                <div class="fb-section-title"><span class="material-icons">bar_chart</span> Score Breakdown</div>
+                <div class="fb-bar-chart">
+                    ${scores.map(s => `
+                        <div class="fb-bar-row">
+                            <span class="fb-bar-label">${s.label}</span>
+                            <div class="fb-bar-track">
+                                <div class="fb-bar-fill" style="width:${s.value}%;background:${s.color}"></div>
+                            </div>
+                            <span class="fb-bar-value">${s.value}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>`;
+        sections.push(barChartHTML);
+
+        // --- 2. Radar Chart (SVG) ---
+        const radar = finalReport.competency_radar || {};
+        const radarLabels = ['confidence', 'clarity', 'body_language', 'content', 'star', 'voice', 'engagement'];
+        const radarDisplayLabels = ['Confidence', 'Clarity', 'Body Lang', 'Content', 'STAR', 'Voice', 'Engage'];
+        const cx = 120, cy = 105, r = 70;
+        const hasRadar = radarLabels.some(l => radar[l]);
+        if (hasRadar) {
+            const gridPolys = [0.25, 0.5, 0.75, 1].map(scale => {
+                const pts = radarLabels.map((_, i) => {
+                    const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
+                    return `${cx + Math.cos(a) * r * scale},${cy + Math.sin(a) * r * scale}`;
+                }).join(' ');
+                return `<polygon points="${pts}" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="0.5"/>`;
+            }).join('');
+            const dataPoly = radarLabels.map((l, i) => {
+                const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
+                const v = (radar[l] || 0) / 100;
+                return `${cx + Math.cos(a) * r * v},${cy + Math.sin(a) * r * v}`;
+            }).join(' ');
+            const labelsHTML = radarLabels.map((l, i) => {
+                const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
+                const lx = cx + Math.cos(a) * (r + 18);
+                const ly = cy + Math.sin(a) * (r + 18);
+                return `<text x="${lx}" y="${ly}" fill="#aaa" font-size="9" text-anchor="middle" dominant-baseline="middle">${radarDisplayLabels[i]}</text>`;
+            }).join('');
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">radar</span> Competency Radar</div>
+                    <svg viewBox="0 0 240 210" class="fb-radar-svg">
+                        ${gridPolys}
+                        <polygon points="${dataPoly}" fill="rgba(66,133,244,0.25)" stroke="#4285f4" stroke-width="1.5"/>
+                        ${labelsHTML}
+                    </svg>
+                </div>`);
         }
-        document.getElementById('feedbackContent').innerHTML = notes.join('') || '<p>Session analytics have been saved.</p>';
+
+        // --- 3. Heatmap ---
+        const heatmap = finalReport.heatmap || [];
+        if (heatmap.length) {
+            const heatHTML = heatmap.map(h => {
+                const bg = h.intensity === 'high' ? '#34a853' : h.intensity === 'medium' ? '#fbbc05' : '#ea4335';
+                return `<div class="fb-heat-cell" style="border-left:3px solid ${bg}">
+                    <strong>Q${h.question_number}</strong>
+                    <span>${(h.focus_area || '').replace('_', ' ')}</span>
+                    <em>${h.overall}/100</em>
+                </div>`;
+            }).join('');
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">grid_view</span> Performance Heatmap</div>
+                    <div class="fb-heatmap">${heatHTML}</div>
+                </div>`);
+        }
+
+        // --- 4. Milestones ---
+        const milestones = finalReport.milestones || [];
+        if (milestones.length) {
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">workspace_premium</span> Milestones Earned</div>
+                    <div class="fb-badges">${milestones.map(m => `<span class="fb-badge" title="${m.description || ''}">${m.badge}</span>`).join('')}</div>
+                </div>`);
+        }
+
+        // --- 5. Strengths & Growth ---
+        if (finalReport.strengths || finalReport.improvements) {
+            sections.push(`
+                <div class="fb-section fb-cols">
+                    ${finalReport.strengths ? `<div class="fb-col good"><div class="fb-col-title"><span class="material-icons">thumb_up</span> Strengths</div><p>${finalReport.strengths}</p></div>` : ''}
+                    ${finalReport.improvements ? `<div class="fb-col grow"><div class="fb-col-title"><span class="material-icons">trending_up</span> Growth Area</div><p>${finalReport.improvements}</p></div>` : ''}
+                </div>`);
+        }
+
+        // --- 6. Study Plan ---
+        if (Array.isArray(finalReport.study_plan) && finalReport.study_plan.length) {
+            const planItems = finalReport.study_plan.map(item => {
+                if (typeof item === 'string') return `<li>${item}</li>`;
+                return `<li><strong>${item.area || item.focus || ''}:</strong> ${item.goal || item.drill || item.tip || JSON.stringify(item)}</li>`;
+            }).join('');
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">school</span> Study Plan</div>
+                    <ul class="fb-study-list">${planItems}</ul>
+                </div>`);
+        }
+
+        // --- 7. Recommendations ---
+        if (Array.isArray(finalReport.recommendations) && finalReport.recommendations.length) {
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">lightbulb</span> Recommendations</div>
+                    <ul class="fb-study-list">${finalReport.recommendations.map(r => `<li>${r}</li>`).join('')}</ul>
+                </div>`);
+        }
+
+        // --- 8. Filler Word Summary ---
+        const fws = finalReport.filler_word_summary;
+        if (fws) {
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">record_voice_over</span> Filler Words</div>
+                    <p>Total: <strong>${fws.total}</strong> — Rating: <strong>${fws.rating}</strong></p>
+                </div>`);
+        }
+
+        document.getElementById('feedbackContent').innerHTML = sections.join('') || '<p>Session analytics have been saved.</p>';
 
         const downloadBtn = document.getElementById('downloadTranscriptBtn');
         downloadBtn.disabled = false;

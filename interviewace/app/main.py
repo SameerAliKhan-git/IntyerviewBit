@@ -240,16 +240,32 @@ async def websocket_endpoint(
 
     async def downstream_task() -> None:
         first_event = True
-        async for event in runner.run_live(
-            user_id=user_id,
-            session_id=session_id,
-            live_request_queue=live_request_queue,
-            run_config=run_config,
-        ):
-            if first_event:
-                first_event = False
-                live_ready.set()
-            await websocket.send_text(event.model_dump_json(exclude_none=True, by_alias=True))
+        try:
+            async for event in runner.run_live(
+                user_id=user_id,
+                session_id=session_id,
+                live_request_queue=live_request_queue,
+                run_config=run_config,
+            ):
+                if first_event:
+                    first_event = False
+                    live_ready.set()
+                try:
+                    await websocket.send_text(event.model_dump_json(exclude_none=True, by_alias=True))
+                except Exception:
+                    break
+        except Exception as api_err:
+            err_str = str(api_err)
+            logger.warning("Live API error for session %s: %s", session_id, err_str)
+            # Send a graceful error event to the frontend
+            try:
+                await websocket.send_text(json.dumps({
+                    "type": "server_error",
+                    "error": err_str,
+                    "recoverable": "1007" not in err_str and "1008" not in err_str,
+                }))
+            except Exception:
+                pass
 
     async def send_intro_when_ready() -> None:
         """Waits for the Live API to be connected, then sends the greeting."""
@@ -283,13 +299,13 @@ async def websocket_endpoint(
     try:
         done, pending = await asyncio.wait(
             {upstream, downstream},
-            return_when=asyncio.FIRST_EXCEPTION,
+            return_when=asyncio.FIRST_COMPLETED,
         )
 
         for task in done:
             exc = task.exception()
-            if exc:
-                raise exc
+            if exc and not isinstance(exc, WebSocketDisconnect):
+                logger.warning("Task error (handled) for session %s: %s", session_id, exc)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session_id)
     except Exception as exc:
