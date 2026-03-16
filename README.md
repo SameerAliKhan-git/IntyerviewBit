@@ -2,7 +2,7 @@
 
 > **Gemini Live Agent Challenge** | Category: **Live Agents 🗣️**
 >
-> 🔗 **[Live Demo](https://interviewace-117780891544.us-central1.run.app/)** · 📹 **[Demo Video](#)** · 🏗️ **[Architecture]([#architechture)**
+> 🔗 **[Live Demo](https://interviewace-117780891544.us-central1.run.app/)** ·🏗️ **[Architecture]([#architechture)**
 
 ---
 
@@ -286,9 +286,9 @@ IntyerviewBit/
 
 ---
 
-## 👥 Team
+## 👥 Built by: 
 
-Built with ❤️ for the **Gemini Live Agent Challenge** by the InterviewAce team.
+Built with ❤️ for the **Gemini Live Agent Challenge** by Sameer
 
 ---
 
