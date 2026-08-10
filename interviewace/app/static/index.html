@@ -8,7 +8,7 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
     <link rel="icon" type="image/x-icon" href="/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css?v=12">
+    <link rel="stylesheet" href="/static/css/style.css?v=13">
 </head>
 <body class="meet-app">
 
@@ -76,8 +76,8 @@
             <div class="sidebar-header">
                 <span class="material-icons">insights</span>
                 <span>Live Analysis</span>
-                <button class="sidebar-close" onclick="toggleSidebar()">
-                    <span class="material-icons">chevron_right</span>
+                <button class="sidebar-close" type="button" aria-label="Hide live analysis">
+                    <span class="material-icons" aria-hidden="true">chevron_right</span>
                 </button>
             </div>
 
@@ -238,16 +238,16 @@
                 <div class="company-badge" id="companyBadge">General</div>
             </div>
 
-            <!-- Elena Tile -->
-            <div class="video-tile" id="elenaTile">
+            <!-- Live transcription tile (an indicator, not a participant) -->
+            <div class="video-tile" id="notesTile">
                 <div class="avatar-container bg-purple">
-                    <div class="meet-rings" id="elenaRings"></div>
-                    <span class="avatar-initial">E</span>
+                    <div class="meet-rings" id="notesRings"></div>
+                    <span class="avatar-initial" aria-hidden="true">T</span>
                 </div>
                 <div class="tile-meta">
                     <div class="meta-label">
-                        <span class="material-icons mic-icon red-icon">mic_off</span>
-                        Elena (Technical Notetaker)
+                        <span class="material-icons mic-icon red-icon" aria-hidden="true">mic_off</span>
+                        Live Transcription
                     </div>
                 </div>
                 <div class="transcribing-badge" id="transcribingBadge" style="display:none;">
@@ -294,13 +294,11 @@
             </div>
         </div>
 
-    </div>
-
-        <!-- NEW: Chat Sidebar -->
+        <!-- Chat Sidebar -->
         <div id="chatSidebar" class="right-sidebar">
             <div class="sidebar-top">
                 <span>In-call messages</span>
-                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+                <button class="close-sidebar-btn" type="button" aria-label="Close chat"><span class="material-icons" aria-hidden="true">close</span></button>
             </div>
             <div class="sidebar-content" id="chatList">
                 <div class="chat-msg">
@@ -314,11 +312,11 @@
             </div>
         </div>
 
-        <!-- NEW: People Sidebar -->
+        <!-- People Sidebar -->
         <div id="peopleSidebar" class="right-sidebar">
             <div class="sidebar-top">
                 <span>People</span>
-                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+                <button class="close-sidebar-btn" type="button" aria-label="Close people panel"><span class="material-icons" aria-hidden="true">close</span></button>
             </div>
             <div class="sidebar-content">
                 <div class="participant">
@@ -330,12 +328,12 @@
                     <div class="participant-icons"><span class="material-icons">mic</span><span class="material-icons">more_vert</span></div>
                 </div>
                 <div class="participant">
-                    <div class="participant-avatar bg-purple">E</div>
+                    <div class="participant-avatar bg-purple" aria-hidden="true">T</div>
                     <div class="participant-info">
-                        <div class="participant-name">Elena</div>
-                        <div class="participant-role">Notetaker</div>
+                        <div class="participant-name">Live Transcription</div>
+                        <div class="participant-role">Automated captions</div>
                     </div>
-                    <div class="participant-icons"><span class="material-icons">mic_off</span><span class="material-icons">more_vert</span></div>
+                    <div class="participant-icons"><span class="material-icons" aria-hidden="true">mic_off</span></div>
                 </div>
                 <div class="participant">
                     <div class="participant-avatar" style="background:#5f6368">Y</div>
@@ -347,23 +345,31 @@
             </div>
         </div>
 
-        <!-- NEW: Meeting Details Sidebar -->
+        <!-- Meeting Details Sidebar -->
         <div id="detailsSidebar" class="right-sidebar">
             <div class="sidebar-top">
                 <span>Meeting details</span>
-                <button class="close-sidebar-btn" onclick="closeAllSidebars()"><span class="material-icons">close</span></button>
+                <button class="close-sidebar-btn" type="button" aria-label="Close meeting details"><span class="material-icons" aria-hidden="true">close</span></button>
             </div>
             <div class="sidebar-content">
                 <div class="detail-box">
-                    <div class="detail-label">Joining info</div>
-                    <div class="detail-val">localhost:8080/meeting/interviewace</div>
-                    <div style="margin-top:8px; display:flex; gap:8px; color:#1a73e8; font-size:14px; cursor:pointer;" onclick="navigator.clipboard.writeText('localhost:8080/meeting/interviewace'); showToast('Meeting link copied');">
-                        <span class="material-icons" style="font-size:18px;">content_copy</span> Copy joining info
-                    </div>
+                    <div class="detail-label">Practice link</div>
+                    <div class="detail-val">Open this app to start your own private session</div>
+                    <button type="button" id="copyJoinInfoBtn" class="link-button">
+                        <span class="material-icons" aria-hidden="true">content_copy</span> Copy link
+                    </button>
                 </div>
                 <div class="detail-box">
                     <div class="detail-label">Session Parameters</div>
-                    <div class="detail-val" id="detailParams">Loading...</div>
+                    <div class="detail-val" id="detailParams">Not started</div>
+                </div>
+                <div class="detail-box">
+                    <div class="detail-label">Privacy</div>
+                    <div class="detail-val">
+                        Audio and video are streamed to Google's Gemini API for live analysis
+                        and are not recorded. Session scores are held in server memory only
+                        and are discarded when the session expires.
+                    </div>
                 </div>
             </div>
         </div>
@@ -377,39 +383,33 @@
             <span class="meeting-code" id="meetingCode">tech-interview</span>
         </div>
         <div class="bar-section center">
-            <button class="meet-btn disabled-state" id="micBtn" title="Microphone (Ctrl+D)">
-                <span class="material-icons">mic_off</span>
+            <button class="meet-btn disabled-state" type="button" id="micBtn" title="Microphone" aria-label="Toggle microphone" aria-pressed="true">
+                <span class="material-icons" aria-hidden="true">mic_off</span>
             </button>
-            <button class="meet-btn disabled-state" id="cameraBtn" title="Camera (Ctrl+E)">
-                <span class="material-icons">videocam_off</span>
+            <button class="meet-btn disabled-state" type="button" id="cameraBtn" title="Camera" aria-label="Toggle camera" aria-pressed="true">
+                <span class="material-icons" aria-hidden="true">videocam_off</span>
             </button>
-            <button class="meet-btn cc-btn" id="ccBtn" title="Captions (c)" disabled>
-                <span class="material-icons">closed_caption</span>
+            <button class="meet-btn cc-btn" type="button" id="ccBtn" title="Captions" aria-label="Toggle captions" aria-pressed="true" disabled>
+                <span class="material-icons" aria-hidden="true">closed_caption</span>
             </button>
-            <button class="meet-btn interaction-btn" title="Raise Hand" data-action="Raise Hand">
-                <span class="material-icons">back_hand</span>
-            </button>
-            <button class="meet-btn interaction-btn" title="More" data-action="More options">
-                <span class="material-icons">more_vert</span>
-            </button>
-            <button class="meet-btn end-btn" id="endBtn" title="End Interview">
-                <span class="material-icons">call_end</span>
+            <button class="meet-btn end-btn" type="button" id="endBtn" title="End Interview" aria-label="End interview and generate report">
+                <span class="material-icons" aria-hidden="true">call_end</span>
             </button>
         </div>
         <div class="bar-section right">
-            <button class="nav-btn interaction-btn" title="Meeting details" data-action="Meeting details"><span class="material-icons">info_outline</span></button>
-            <button class="nav-btn interaction-btn" title="People" data-action="People"><span class="material-icons">people_outline</span></button>
-            <button class="nav-btn interaction-btn" title="Chat" data-action="Chat"><span class="material-icons">chat_bubble_outline</span></button>
-            <button class="nav-btn interaction-btn" title="Live Analysis" data-action="Live Analysis"><span class="material-icons">insights</span></button>
+            <button class="nav-btn interaction-btn" type="button" title="Meeting details" aria-label="Meeting details" data-action="Meeting details"><span class="material-icons" aria-hidden="true">info_outline</span></button>
+            <button class="nav-btn interaction-btn" type="button" title="People" aria-label="People" data-action="People"><span class="material-icons" aria-hidden="true">people_outline</span></button>
+            <button class="nav-btn interaction-btn" type="button" title="Chat" aria-label="Chat" data-action="Chat"><span class="material-icons" aria-hidden="true">chat_bubble_outline</span></button>
+            <button class="nav-btn interaction-btn" type="button" title="Live Analysis" aria-label="Toggle live analysis" data-action="Live Analysis"><span class="material-icons" aria-hidden="true">insights</span></button>
         </div>
     </div>
 
     <!-- FEEDBACK MODAL -->
-    <div class="modal-overlay" id="feedbackPanel" style="display:none;">
+    <div class="modal-overlay" id="feedbackPanel" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="feedbackTitle">
         <div class="meet-dialog">
-            <div class="dialog-icon"><span class="material-icons">emoji_events</span></div>
-            <h2 class="dialog-title">Interview Complete!</h2>
-            <p class="dialog-subtitle">Elena has compiled your performance report. Here's your full breakdown:</p>
+            <div class="dialog-icon"><span class="material-icons" aria-hidden="true">emoji_events</span></div>
+            <h2 class="dialog-title" id="feedbackTitle">Interview Complete</h2>
+            <p class="dialog-subtitle">Here's your performance breakdown from this session:</p>
 
             <div class="score-summary">
                 <div class="score-item main-score">
@@ -432,20 +432,21 @@
             </div>
 
             <div class="dialog-actions">
-                <button class="dialog-btn secondary" onclick="window.location.reload()">New Session</button>
-                <button class="dialog-btn primary" id="downloadTranscriptBtn" disabled>
-                    <span class="material-icons" style="font-size:16px;vertical-align:middle;">download</span>
+                <button class="dialog-btn secondary" type="button" id="newSessionBtn">New Session</button>
+                <button class="dialog-btn primary" type="button" id="downloadTranscriptBtn" disabled>
+                    <span class="material-icons" style="font-size:16px;vertical-align:middle;" aria-hidden="true">download</span>
                     Download Transcript
                 </button>
             </div>
         </div>
     </div>
 
-    <!-- Scripts -->
-    <script src="/static/js/audio-player.js?v=12"></script>
-    <script src="/static/js/audio-recorder.js?v=12"></script>
-    <script src="/static/js/camera.js?v=12"></script>
-    <script src="/static/js/dashboard.js?v=12"></script>
-    <script src="/static/js/app.js?v=12"></script>
+    <!-- Scripts. dashboard.js defines the shared escaping helpers app.js relies on, so
+         it must load first. -->
+    <script src="/static/js/audio-player.js?v=13"></script>
+    <script src="/static/js/audio-recorder.js?v=13"></script>
+    <script src="/static/js/camera.js?v=13"></script>
+    <script src="/static/js/dashboard.js?v=13"></script>
+    <script src="/static/js/app.js?v=13"></script>
 </body>
 </html>

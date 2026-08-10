@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    defaults:
+      run:
+        working-directory: interviewace
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install test dependencies
+        # The suite stubs google-adk, so only the web stack is needed to run it.
+        run: pip install fastapi 'uvicorn[standard]' httpx python-dotenv pytest ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+
+      - name: Test again in reverse file order
+        # The suite manipulates sys.modules; this catches order-dependent state leaks.
+        run: pytest -q test_adk_events.py test_interviewace.py
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Maintained detectors, including provider verification. Preferred over a
+      # hand-written regex: Google has already changed its API key format once
+      # (from AIza+35 to a dotted 53-character form), and a pattern list embedded
+      # in this repo silently stops catching whatever ships next.
+      - name: TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --results=verified,unknown
+
+      # Fast belt-and-braces check for the two Google key shapes seen so far.
+      # Lock files and requirements are excluded: their URLs and sha256 hashes
+      # match any sufficiently generic high-entropy pattern.
+      - name: Grep for known Google API key shapes
+        run: |
+          if git grep -nIE '(AIza[0-9A-Za-z_-]{35}|[A-Za-z0-9]{2}\.[A-Za-z0-9_-]{45,60})' \
+               -- . ':!*uv.lock' ':!*requirements.txt' ':!*.md' ':!.github/workflows/*'; then
+            echo "::error::A Google API key pattern is present in tracked files."
+            exit 1
+          fi
+          echo "No API key patterns found in tracked files."
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f interviewace/Dockerfile interviewace/

@@ -1,6 +1,6 @@
 /**
  * camera.js
- * Handles WebRTC camera access, video display, and extracting base64 frames
+ * Webcam access, preview, and periodic JPEG frame extraction for vision analysis.
  */
 
 class CameraManager {
@@ -9,53 +9,50 @@ class CameraManager {
         this.canvas = document.createElement('canvas');
         this.ctx = this.canvas.getContext('2d');
         this.stream = null;
-        this.isRecording = false;
-        
-        // Adaptive frame rate based on bandwidth/connection
-        this.frameIntervalMs = 1000; // Default 1 fps
+        this.isCapturing = false;
+
+        this.frameIntervalMs = 1000; // 1 fps by default
         this.frameIntervalId = null;
-        this.onFrameCaptured = null; // Callback for app.js
+        this.onFrameCaptured = null;
         this.bandwidthCheckInterval = null;
-        this.lowBandwidthMode = false;
+        this.currentTier = 'normal';
     }
 
     async start() {
         try {
-            console.log("📷 Requesting camera access...");
             this.stream = await navigator.mediaDevices.getUserMedia({
                 video: {
                     width: { ideal: 640 },
                     height: { ideal: 480 },
-                    facingMode: "user"
+                    facingMode: 'user',
                 },
-                audio: false // Handled separately by audio-recorder.js
+                audio: false, // handled separately by audio-recorder.js
             });
-            
+
             this.videoElement.srcObject = this.stream;
-            
-            // Wait for video metadata to set canvas size
-            await new Promise(resolve => {
-                this.videoElement.onloadedmetadata = () => {
-                    this.canvas.width = this.videoElement.videoWidth;
-                    this.canvas.height = this.videoElement.videoHeight;
+
+            await new Promise((resolve) => {
+                if (this.videoElement.readyState >= 1) {
                     resolve();
-                };
+                    return;
+                }
+                this.videoElement.onloadedmetadata = () => resolve();
             });
-            
-            // Start bandwidth monitoring
+
+            this.canvas.width = this.videoElement.videoWidth || 640;
+            this.canvas.height = this.videoElement.videoHeight || 480;
+
             this.startBandwidthMonitoring();
-            
-            console.log("📷 Camera started successfully");
             return true;
         } catch (error) {
-            console.error("❌ Camera error:", error);
+            console.error('Camera error:', error);
             return false;
         }
     }
 
     stop() {
         if (this.stream) {
-            this.stream.getTracks().forEach(track => track.stop());
+            this.stream.getTracks().forEach((track) => track.stop());
             this.stream = null;
             if (this.videoElement) this.videoElement.srcObject = null;
         }
@@ -64,10 +61,7 @@ class CameraManager {
     }
 
     startBandwidthMonitoring() {
-        // Check connection every 30 seconds
-        this.bandwidthCheckInterval = setInterval(() => {
-            this.checkBandwidthAndAdapt();
-        }, 30000);
+        this.bandwidthCheckInterval = setInterval(() => this.adaptToBandwidth(), 30000);
     }
 
     stopBandwidthMonitoring() {
@@ -77,95 +71,82 @@ class CameraManager {
         }
     }
 
-    async checkBandwidthAndAdapt() {
-        try {
-            // Simple bandwidth estimation using navigator.connection if available
-            const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-            
-            if (connection) {
-                const effectiveType = connection.effectiveType; // 'slow-2g', '2g', '3g', '4g'
-                const downlink = connection.downlink; // Mbps
-                
-                // Adapt frame rate based on connection
-                if (effectiveType === 'slow-2g' || effectiveType === '2g' || downlink < 1) {
-                    if (!this.lowBandwidthMode) {
-                        this.lowBandwidthMode = true;
-                        this.frameIntervalMs = 3000; // 0.33 fps
-                        console.log("📶 Low bandwidth detected, reducing frame rate to 0.33 fps");
-                        this.restartFrameExtraction();
-                    }
-                } else if (effectiveType === '3g' || downlink < 5) {
-                    if (!this.lowBandwidthMode) {
-                        this.lowBandwidthMode = true;
-                        this.frameIntervalMs = 2000; // 0.5 fps
-                        console.log("📶 Moderate bandwidth, reducing frame rate to 0.5 fps");
-                        this.restartFrameExtraction();
-                    }
-                } else {
-                    if (this.lowBandwidthMode) {
-                        this.lowBandwidthMode = false;
-                        this.frameIntervalMs = 1000; // 1 fps
-                        console.log("📶 Good bandwidth, using normal 1 fps");
-                        this.restartFrameExtraction();
-                    }
-                }
-            }
-        } catch (error) {
-            console.warn("Bandwidth check failed:", error);
-        }
-    }
+    adaptToBandwidth() {
+        const connection =
+            navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (!connection) return;
 
-    restartFrameExtraction() {
-        if (this.isRecording) {
+        const effectiveType = connection.effectiveType;
+        const downlink = connection.downlink;
+
+        let tier = 'normal';
+        let interval = 1000;
+        if (effectiveType === 'slow-2g' || effectiveType === '2g' || downlink < 1) {
+            tier = 'low';
+            interval = 3000;
+        } else if (effectiveType === '3g' || downlink < 5) {
+            tier = 'moderate';
+            interval = 2000;
+        }
+
+        // Only restart the timer when the tier actually changes. The previous version
+        // latched a boolean, so it could never step back up from low to moderate.
+        if (tier === this.currentTier) return;
+        this.currentTier = tier;
+        this.frameIntervalMs = interval;
+        if (this.isCapturing) {
             this.stopFrameExtraction();
             this.startFrameExtraction(this.onFrameCaptured);
         }
     }
 
     startFrameExtraction(callback) {
+        if (!this.stream || !callback) return;
         this.onFrameCaptured = callback;
-        if (!this.stream) return;
-        
-        this.isRecording = true;
-        
-        this.frameIntervalId = setInterval(() => {
-            if (this.isRecording) this.captureAndConvertFrame();
-        }, this.frameIntervalMs);
+        this.isCapturing = true;
+        this.frameIntervalId = setInterval(() => this.captureFrame(), this.frameIntervalMs);
     }
 
     stopFrameExtraction() {
-        this.isRecording = false;
+        this.isCapturing = false;
         if (this.frameIntervalId) {
             clearInterval(this.frameIntervalId);
             this.frameIntervalId = null;
         }
     }
 
-    captureAndConvertFrame() {
+    isEnabled() {
+        const track = this.stream && this.stream.getVideoTracks()[0];
+        return Boolean(track && track.enabled);
+    }
+
+    captureFrame() {
+        // Guard against uploading frames the user believes are not being sent. A disabled
+        // track still renders (as black), so without this the "camera off" button only
+        // changes what the candidate sees, not what leaves the machine.
+        if (!this.isCapturing || !this.isEnabled()) return;
         if (!this.videoElement || !this.videoElement.videoWidth) return;
-        
-        // Draw video frame to canvas
+
         this.ctx.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
-        
-        // Convert to base64 JPEG (lower quality to save bandwidth)
-        const frameDataUrl = this.canvas.toDataURL('image/jpeg', 0.6);
-        const base64Data = frameDataUrl.split(',')[1];
-        
+        const base64Data = this.canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
         if (this.onFrameCaptured && base64Data) {
             this.onFrameCaptured(base64Data);
         }
     }
 
+    /** Returns the new enabled state. */
     toggle() {
-        if (!this.stream) return false;
-        const videoTrack = this.stream.getVideoTracks()[0];
-        if (videoTrack) {
-            videoTrack.enabled = !videoTrack.enabled;
-            return videoTrack.enabled; // Return new state
+        const track = this.stream && this.stream.getVideoTracks()[0];
+        if (!track) return false;
+
+        track.enabled = !track.enabled;
+        if (track.enabled) {
+            if (!this.isCapturing) this.startFrameExtraction(this.onFrameCaptured);
+        } else {
+            this.stopFrameExtraction();
         }
-        return false;
+        return track.enabled;
     }
 }
 
-// Export for app.js
 window.CameraManager = CameraManager;

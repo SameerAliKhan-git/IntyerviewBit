@@ -1,20 +1,21 @@
 [project]
 name = "interviewace"
-version = "1.0.0"
-description = "AI-powered real-time interview coach that sees your body language and hears your voice — built with Google ADK & Gemini Live API"
+version = "2.0.0"
+description = "Real-time multimodal AI interview coach built with Google ADK and the Gemini Live API"
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
-    "google-adk>=0.6.0",
-    "google-cloud-firestore>=2.16.0",
-    "google-cloud-storage>=2.14.0",
+    "google-adk>=1.27.0",
+    "google-genai>=1.0.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "websockets>=12.0",
     "python-dotenv>=1.0.0",
-    "google-genai>=1.0.0",
 ]
+
+# google-cloud-firestore and google-cloud-storage were previously listed here but no
+# code path used them. Session state is in-process only; see SECURITY.md.
 
 [project.optional-dependencies]
 dev = [
@@ -26,3 +27,15 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = ["app/static"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = [
+    # Long lines are confined to prompt text and coaching copy.
+    "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally build fake modules and import lazily.
+"test_*.py" = ["B008"]

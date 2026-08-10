@@ -1,48 +1,74 @@
-#!/bin/bash
-# deploy.sh
-# Automated deployment script for InterviewAce to Google Cloud Run
-# This script fulfills the "Automated cloud deployment" bonus point requirement.
+#!/usr/bin/env bash
+#
+# Deploys InterviewAce to Google Cloud Run via Cloud Build.
+#
+# This delegates to cloudbuild.yaml so there is exactly one build definition and one
+# Dockerfile. Secrets are read from Secret Manager at runtime and are never passed on
+# the command line, where they would land in shell history and build logs.
+#
+# Usage:
+#   PROJECT_ID=my-project ./deploy.sh
 
-set -e
+set -euo pipefail
 
-echo "🚀 Starting deployment to Google Cloud..."
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+REGION="${REGION:-us-central1}"
+SERVICE_NAME="${SERVICE_NAME:-interviewace}"
 
-# Configuration - Replace with your actual project details
-PROJECT_ID="your-google-cloud-project-id"
-REGION="us-central1"
-SERVICE_NAME="interviewace"
-IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME"
+if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "(unset)" ]]; then
+  echo "ERROR: set PROJECT_ID, e.g. PROJECT_ID=my-project ./deploy.sh" >&2
+  exit 1
+fi
 
-echo "📦 Setting active GCP project to $PROJECT_ID..."
-gcloud config set project $PROJECT_ID
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-echo "🛠️ Extracting dependencies from pyproject.toml..."
-# A simple way to get requirements.txt for the Docker build
-pip install tomli
-python -c "
-import tomli
-with open('../pyproject.toml', 'rb') as f:
-    config = tomli.load(f)
-deps = config.get('project', {}).get('dependencies', [])
-with open('requirements.txt', 'w') as out:
-    out.write('\n'.join(deps))
-"
-mv requirements.txt ./deploy/requirements.txt
+echo "Project : ${PROJECT_ID}"
+echo "Region  : ${REGION}"
+echo "Service : ${SERVICE_NAME}"
+echo
 
-echo "🏗️ Building the Docker image..."
-cd deploy
-docker build -t $IMAGE_NAME .
+echo "==> Enabling required APIs"
+gcloud services enable \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  secretmanager.googleapis.com \
+  --project "${PROJECT_ID}"
 
-echo "📤 Pushing image to Google Container Registry..."
-docker push $IMAGE_NAME
+echo "==> Checking required secrets"
+missing=0
+for secret in interviewace-api-key interviewace-session-secret; do
+  if ! gcloud secrets describe "${secret}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "  MISSING: ${secret}" >&2
+    missing=1
+  else
+    echo "  ok: ${secret}"
+  fi
+done
 
-echo "🚀 Deploying to Google Cloud Run..."
-gcloud run deploy $SERVICE_NAME \
-  --image $IMAGE_NAME \
-  --region $REGION \
-  --platform managed \
-  --allow-unauthenticated \
-  --set-env-vars="AGENT_MODEL=gemini-2.5-flash-native-audio-preview-12-2025"
+if [[ "${missing}" -eq 1 ]]; then
+  cat >&2 <<'EOF'
 
-echo "✅ Deployment complete!"
-echo "Your InterviewAce AI Coach is now live on Google Cloud Platform."
+Create the missing secrets before deploying:
+
+  printf '%s' "YOUR_GEMINI_API_KEY" | \
+    gcloud secrets create interviewace-api-key --data-file=-
+
+  python -c "import secrets;print(secrets.token_urlsafe(48))" | \
+    gcloud secrets create interviewace-session-secret --data-file=-
+
+EOF
+  exit 1
+fi
+
+echo "==> Submitting build and deploy"
+gcloud builds submit "${REPO_ROOT}" \
+  --config "${REPO_ROOT}/cloudbuild.yaml" \
+  --project "${PROJECT_ID}" \
+  --substitutions "_REGION=${REGION},_SERVICE=${SERVICE_NAME}"
+
+URL="$(gcloud run services describe "${SERVICE_NAME}" \
+  --region "${REGION}" --project "${PROJECT_ID}" --format 'value(status.url)')"
+
+echo
+echo "Deployment complete: ${URL}"
+echo "Reminder: this service is public. Confirm a billing budget alert is configured."

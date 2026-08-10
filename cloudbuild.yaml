@@ -1,20 +1,51 @@
-# InterviewAce - Cloud Run deployment configuration
-# This file is used by gcloud run deploy and Cloud Build
+# InterviewAce - Cloud Build + Cloud Run deployment
+#
+# Prerequisites (once per project):
+#   gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+#       artifactregistry.googleapis.com secretmanager.googleapis.com
+#   printf '%s' "$YOUR_GEMINI_KEY" | gcloud secrets create interviewace-api-key --data-file=-
+#   python -c "import secrets;print(secrets.token_urlsafe(48))" | \
+#       gcloud secrets create interviewace-session-secret --data-file=-
+#   gcloud secrets add-iam-policy-binding interviewace-api-key \
+#       --member="serviceAccount:$PROJECT_NUMBER-compute@developer.gserviceaccount.com" \
+#       --role=roles/secretmanager.secretAccessor
+#
+# This service is deployed unauthenticated, so anyone who reaches it consumes the key's
+# quota. On a free-tier key that means 429s; if the project has billing enabled, add a
+# budget alert. Note Cloud Run itself requires a billing account even for its free tier.
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE: interviewace
+
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/interviewace', '-f', 'interviewace/Dockerfile', 'interviewace/']
+    id: build
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE}:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE}:latest'
+      - '-f'
+      - 'interviewace/Dockerfile'
+      - 'interviewace/'
+
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/interviewace']
+    id: push
+    args: ['push', '--all-tags', 'gcr.io/$PROJECT_ID/${_SERVICE}']
+
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: deploy
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'interviewace'
+      - '${_SERVICE}'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/interviewace'
+      - 'gcr.io/$PROJECT_ID/${_SERVICE}:$COMMIT_SHA'
       - '--region'
-      - 'us-central1'
+      - '${_REGION}'
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
@@ -28,8 +59,22 @@ steps:
       - '0'
       - '--max-instances'
       - '10'
+      # A live interview is one long WebSocket; without a matching request timeout
+      # Cloud Run cuts the call off at its 5-minute default.
+      - '--timeout'
+      - '3600'
+      # Analytics reads must land on the instance holding that session's state.
+      - '--session-affinity'
+      # Secrets are mounted from Secret Manager rather than passed with --set-env-vars,
+      # which would place the key in build logs and in the revision spec.
+      - '--set-secrets'
+      - 'GOOGLE_API_KEY=interviewace-api-key:latest,SESSION_SECRET=interviewace-session-secret:latest'
       - '--set-env-vars'
-      - 'GOOGLE_GENAI_USE_VERTEXAI=FALSE'
+      - 'GOOGLE_GENAI_USE_VERTEXAI=FALSE,MAX_CONCURRENT_SESSIONS=25,MAX_SESSION_SECONDS=1200'
 
 images:
-  - 'gcr.io/$PROJECT_ID/interviewace'
+  - 'gcr.io/$PROJECT_ID/${_SERVICE}:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/${_SERVICE}:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

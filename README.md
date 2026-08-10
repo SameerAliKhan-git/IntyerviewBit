@@ -1,264 +1,237 @@
 # 🎯 InterviewAce — Real-Time AI Interview Coach
 
-> **Gemini Live Agent Challenge** | Category: **Live Agents 🗣️**
+> **Gemini Live Agent Challenge** · Category: **Live Agents 🗣️**
 >
-> 🔗 **[Live Demo](https://interviewace-117780891544.us-central1.run.app/)** ·🏗️ **[Architecture]([#architechture)**
->
->
-> ### **[Proof_of_GCP_Deployement]**
-> https://github.com/user-attachments/assets/04eed382-ea8f-4053-b079-65efb8129cbf
- 
-
-
-
+> 🔗 **[Live Demo](https://interviewace-117780891544.us-central1.run.app/)** · 🏗️ **[Architecture](#-architecture)** · 🔐 **[Security](SECURITY.md)**
 
 ---
 
 ## 💡 The Problem
 
 Practicing for technical interviews is one of the most stressful parts of a job search:
-- **Real mock interviews cost $150–300/session** — inaccessible for most candidates
-- Candidates make the same mistakes repeatedly — **filler words, bad posture, unstructured answers** — without ever knowing it
-- Existing AI chatbots are **text-only**, missing the critical non-verbal dimensions that real interviewers evaluate
+
+- **Mock interviews with a real coach cost $150–300 a session** — out of reach for most candidates
+- Candidates repeat the same mistakes — filler words, closed posture, unstructured answers — without ever hearing about them
+- Text-based AI chatbots miss the non-verbal dimension entirely
 
 ## 🚀 The Solution
 
-**InterviewAce** is a real-time, multimodal AI interview coach that replicates a genuine **Google Meet-style** technical interview. A live AI hiring manager ("Coach Ace") **sees** your body language through the camera, **hears** your filler words through the microphone, and **speaks** to you naturally through native voice — all powered by the **Gemini Live API** and **Google ADK**.
+**InterviewAce** is a real-time multimodal mock interview. A live AI hiring manager ("Coach Ace")
+sees your body language through the camera, hears your delivery through the microphone, and speaks
+to you in native voice — powered by the **Gemini Live API** and **Google ADK**.
 
-> **No text boxes. No typing. Just a real conversation with an AI that actually watches and listens.**
+> No text boxes. No typing. A real spoken conversation, with a scorecard at the end.
 
 ---
 
-## ✨ Key Features
+## ✨ Features
 
-| Feature | How It Works |
-|---------|-------------|
-| 🗣️ **Native Audio Voice** | Real-time bidirectional audio via Gemini 2.5 Flash Native Audio. Sub-500ms latency. Supports natural interruptions and barge-in. |
-| 👀 **Live Camera Vision** | Webcam frames streamed at adaptive 0.33-1 fps for real-time body language analysis (posture, eye contact, expression, gestures). Bandwidth-adaptive. |
-| 📊 **13 ADK Background Tools** | Silent analysis tools fire automatically during the interview — filler word detection, STAR method evaluation, voice confidence (pace/volume/tone/pauses), body language (gestures/expressions), and dynamic difficulty scaling. |
-| 🔍 **Google Search Grounding** | ADK's built-in `google_search` tool prevents hallucination of company interview facts. Expanded grounding for 8+ companies. |
-| 🏢 **Company-Specific Styles** | Google, Amazon (Leadership Principles), Meta, Apple, Microsoft, Netflix, Airbnb, Stripe, Uber interview question frameworks. |
-| 📝 **Session Report & Transcript** | Full performance breakdown with downloadable transcript after every session. |
-| 🎨 **Google Meet Replica UI** | Pixel-perfect Meet interface with closed captions, volume visualizers, participant panel, chat sidebar, and session timer. |
-| ⚡ **Adaptive Performance** | Dynamic difficulty scaling based on candidate performance. Bandwidth-adaptive video streaming. Robust interruption handling. |
+| Feature | How it works |
+|---------|--------------|
+| 🗣️ **Native audio voice** | Bidirectional PCM audio over the Gemini Live API via ADK's `LiveRequestQueue`. Supports interruption and barge-in. |
+| 👀 **Live camera vision** | Webcam frames streamed at an adaptive 0.33–1 fps for body-language observations. Frames stop immediately when you turn the camera off. |
+| 📊 **15 coaching tools** | Scoring, STAR evaluation, voice delivery, engagement, emotion, and reporting tools the model calls during the interview. |
+| 🔤 **Measured filler words** | Counted server-side from Gemini's real speech transcript — not estimated by the model. |
+| 🔍 **Search grounding** | A dedicated research sub-agent uses `google_search` so company facts are looked up rather than guessed. |
+| 🏢 **Company styles** | Google, Amazon, Meta, Apple, Microsoft, Netflix question frameworks. |
+| 📝 **Deterministic report** | The end-of-session report is computed server-side from recorded state, so it never depends on the model calling a tool in time. |
+| 🎨 **Meet-style UI** | Live captions, volume visualizers, analytics sidebar, session timer, downloadable transcript. |
+
+### What is measured vs. judged
+
+Being straight about this matters, because the scorecard looks like measurement:
+
+| Signal | Source |
+|--------|--------|
+| Filler word count and rate | **Measured** from Gemini's `input_transcription` of your actual speech |
+| Session duration, question count, score trends | **Measured** from recorded session state |
+| Confidence, clarity, content, STAR, body language, voice, engagement | **Judged by the model** — a consistent rubric applied to a subjective read, not a physical measurement |
 
 ---
 
 ## 🏗️ Architecture
 
-InterviewAce follows the official **ADK bidirectional streaming pattern** (`LiveRequestQueue`) for real-time voice + vision interaction.
-
 ```mermaid
 graph TB
-    subgraph "🖥️ Browser (Vanilla JS)"
-        MIC[🎤 Microphone<br/>PCM 16kHz] --> WS
-        CAM[📷 Camera<br/>JPEG 1fps] --> WS
-        WS[WebSocket Client] <--> |Audio + Images + JSON| BACKEND
-        WS --> PLAYER[🔊 Audio Player<br/>PCM Playback]
-        WS --> CC[💬 Closed Captions]
-        WS --> ANALYTICS[📊 Live Analytics<br/>Sidebar]
+    subgraph "Browser (vanilla JS)"
+        MIC[🎤 Mic<br/>AudioWorklet, PCM 16 kHz] --> WS
+        CAM[📷 Camera<br/>JPEG 0.33-1 fps] --> WS
+        WS[WebSocket client] --> PLAYER[🔊 PCM player<br/>tracked buffers, real barge-in]
+        WS --> CC[💬 Captions]
+        WS --> ANALYTICS[📊 Analytics sidebar]
     end
 
-    subgraph "⚙️ FastAPI Backend (Python)"
-        BACKEND[WebSocket Server<br/>main.py] --> LRQ[LiveRequestQueue]
+    subgraph "FastAPI backend"
+        TICKET[POST /api/session<br/>signed session ticket]
+        BACKEND[WebSocket server<br/>main.py]
+        REPORT[POST /api/sessions/:id/report<br/>deterministic]
+        BACKEND --> LRQ[LiveRequestQueue]
+        BACKEND --> TRANSCRIPT[Transcript buffer<br/>filler measurement]
         LRQ --> RUNNER[ADK Runner]
-        RUNNER --> SESSION[InMemorySessionService]
+        RUNNER --> SESSION[InMemorySessionService<br/>state: session_id]
     end
 
-    subgraph "🤖 Google ADK Agent"
-        RUNNER <--> |Bidi Stream| GEMINI[Gemini 2.5 Flash<br/>Native Audio + Vision]
-        GEMINI --> |Autonomous Tool Calls| TOOLS
+    subgraph "ADK agent"
+        RUNNER <--> GEMINI[Gemini 2.5 Flash<br/>native audio + vision]
+        GEMINI --> TOOLS[15 function tools<br/>session_id injected via ToolContext]
+        GEMINI --> RESEARCH[interview_research sub-agent<br/>google_search]
     end
 
-    subgraph "🔧 11 Custom Tools (3 Tiers)"
-        direction LR
-        subgraph "Tier 1: Core Analysis"
-            T1[save_session_feedback]
-            T2[detect_filler_words]
-            T3[analyze_body_language]
-            T4[evaluate_star_method]
-        end
-        subgraph "Tier 2: Deep Coaching"
-            T5[analyze_voice_confidence]
-            T6[get_improvement_tips]
-            T7[fetch_grounding_data]
-        end
-        subgraph "Tier 3: Reporting"
-            T8[get_session_history]
-            T9[save_session_recording]
-            T10[generate_session_report]
-        end
-        subgraph "Grounding"
-            T11[google_search<br/>ADK Built-in]
-        end
-    end
-
-    TOOLS --> T1 & T2 & T3 & T4 & T5 & T6 & T7 & T8 & T9 & T10 & T11
-
-    subgraph "☁️ Google Cloud"
-        CR[Cloud Run<br/>Serverless Container]
-        GCR[Container Registry]
-    end
-
-    CR --> BACKEND
+    WS <--> BACKEND
+    TICKET --> WS
+    CR[Cloud Run] --> BACKEND
+    SM[Secret Manager] --> CR
 ```
 
-### Data Flow
+### Data flow
 
 ```
-1. User speaks → Mic captures PCM audio → WebSocket → FastAPI → LiveRequestQueue → Gemini Live API
-2. User's camera → JPEG frame (1 fps) → WebSocket → FastAPI → LiveRequestQueue → Gemini Vision
-3. Gemini responds → Native audio bytes → WebSocket → Browser AudioPlayer → User hears voice
-4. Gemini calls tools → ADK executes silently → Results update sidebar analytics in real-time
-5. Gemini transcribes → Input/Output transcription → Closed Captions rendered in UI
+1. Browser requests a session  -> server mints a random id + HMAC-signed token
+2. Mic PCM  -> WebSocket -> LiveRequestQueue -> Gemini Live API
+3. Camera JPEG -> WebSocket -> LiveRequestQueue -> Gemini vision
+4. Gemini audio -> WebSocket -> browser AudioPlayer (buffers tracked, so barge-in cuts them)
+5. Gemini input_transcription -> server transcript buffer -> filler-word measurement
+6. Gemini tool calls -> ADK executes -> results pushed to the owning session's socket only
+7. End of interview -> POST /report -> report computed from recorded state
 ```
+
+### Session identity and isolation
+
+Session ids are generated **server-side** (`secrets.token_urlsafe`) and returned with an
+HMAC-signed token. Every analytics read must present that token. Inside the agent, tools
+receive their `session_id` from ADK's `ToolContext` — it is never a model-supplied argument,
+and a tool call that cannot resolve a session records nothing rather than falling back to
+another active session.
 
 ---
 
-## 🔧 How the Agent Works
-
-### The Agent: Coach Ace
-
-Coach Ace is a single **ADK `Agent`** with a carefully engineered persona — a senior hiring manager with 15 years at Google, Meta, Amazon, and Apple. The agent:
-
-1. **Greets the candidate** naturally when they join the meeting
-2. **Generates dynamic interview questions** based on the selected role, company style, and difficulty level
-3. **Listens to answers** and provides natural, human-like follow-ups ("Okay, and what was the actual outcome there?")
-4. **Silently analyzes** the candidate every 2-3 answers using background tool calls:
-   - `save_session_feedback` — Scores confidence, clarity, content, body language (0-100)
-   - `detect_filler_words` — Counts "um", "uh", "like", "you know", etc.
-   - `analyze_body_language` — Rates posture, eye contact, expression from camera frames
-   - `evaluate_star_method` — Checks if the answer followed Situation-Task-Action-Result structure
-5. **Generates a comprehensive session report** when the interview ends
-
-### Tool Tier Architecture
-
-| Tier | Tools | Purpose |
-|------|-------|---------|
-| **Tier 1** | `save_session_feedback`, `detect_filler_words`, `analyze_body_language`, `evaluate_star_method` | Core real-time analysis — fires every 2-3 answers |
-| **Tier 2** | `analyze_voice_confidence`, `get_improvement_tips`, `fetch_grounding_data`, `adjust_difficulty_level` | Deeper coaching — voice/tone/pause analysis, targeted tips, verified knowledge base, dynamic scaling |
-| **Tier 3** | `get_session_history`, `save_session_recording`, `generate_session_report` | Session management and comprehensive reporting |
-| **Grounding** | `google_search` (ADK built-in) | Prevents hallucination of company-specific interview facts |
-
-### Grounding & Anti-Hallucination
-
-InterviewAce uses **two grounding mechanisms**:
-1. **`fetch_grounding_data`** — Returns verified interview coaching knowledge from a curated local database (`grounding_data.py`) covering STAR method, body language tips, voice delivery, and common mistakes
-2. **`google_search`** (ADK built-in) — When the candidate asks about a specific company's interview process, the agent searches for real, current information rather than guessing
-
----
-
-## 🎨 UI Features
-
-The frontend is a **pixel-perfect Google Meet replica** built entirely with vanilla JavaScript:
-
-- **3 Video Tiles** — Coach Ace (AI interviewer), Elena (AI notetaker), You (with live webcam feed)
-- **Volume Visualizer Rings** — Animated concentric rings pulse in real-time when audio is detected
-- **Equalizer Bars** — 3-bar equalizer animation replaces the mic icon when speaking
-- **Closed Captions** — Real-time CC powered by Gemini's input/output transcription
-- **Live Analytics Sidebar** — Confidence, Clarity, STAR Score, Body Language bars update in real-time
-- **Filler Word Counter** — Running count with detected words and coaching tips
-- **Body Language Indicators** — Eye contact, posture, expression ratings with color-coded dots
-- **STAR Method Badges** — S, T, A, R badges light up green as you hit each component
-- **Session Timer** — MM:SS elapsed time counter during active interviews
-- **Chat Sidebar** — In-call messaging panel (Google Meet style)
-- **People Panel** — Shows all 3 participants with mic status
-- **Meeting Details** — Coupable meeting link and session parameters
-- **Toast Notifications** — Contextual notifications for mic/camera/CC toggles
-- **Feedback Modal** — Full score breakdown with performance tier and downloadable transcript
-
----
-
-## 💻 Getting Started
+## 💻 Getting started
 
 ### Prerequisites
-- Python 3.10+
-- A [Google API Key](https://aistudio.google.com/app/apikey) with Gemini access
 
-### Installation
+- Python 3.10+
+- A [Google API key](https://aistudio.google.com/app/apikey) with Gemini access
+
+### Install and run
 
 ```bash
-# Clone the repository
 git clone https://github.com/SameerAliKhan-git/IntyerviewBit.git
 cd IntyerviewBit/interviewace
 
-# Create virtual environment
 python -m venv venv
+source venv/bin/activate        # Windows: .\venv\Scripts\activate
 
-# Activate (Windows)
-.\venv\Scripts\activate
-# Activate (Mac/Linux)
-source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
+
+cp .env.example .env            # then add your GOOGLE_API_KEY
+
+uvicorn app.main:app --reload --port 8080
 ```
 
-### Environment Variables
+Open **http://localhost:8080** and grant camera and microphone permission.
 
-Create a `.env` file in the `interviewace/` directory:
+> Run from the `interviewace/` directory using `app.main:app`. That is the canonical import
+> path; importing from inside `app/` can load modules twice with split session state.
 
-```env
-GOOGLE_API_KEY=your_gemini_api_key_here
-```
+### Configuration
 
-### Run Locally
+All variables are documented in [.env.example](interviewace/.env.example). The ones that matter:
+
+| Variable | Purpose |
+|----------|---------|
+| `GOOGLE_API_KEY` | **Required.** Gemini API key. A free-tier AI Studio key works — no billing account needed. |
+| `SESSION_SECRET` | Signs session tokens. Set this in any multi-instance deployment. |
+| `MAX_SESSION_SECONDS` | Hard cap per interview (default 600). |
+| `MAX_CONCURRENT_SESSIONS`, `MAX_SESSIONS_PER_IP`, `NEW_SESSIONS_PER_IP_PER_HOUR` | Quota and abuse caps. Defaults are sized for the free tier; raise them on a paid quota. |
+| `ENABLE_DEBUG_ENDPOINT` | Exposes `/debug`. Leave off in production. |
+| `ENABLE_SEARCH_GROUNDING` | Set `false` to drop the search sub-agent. |
+
+### Tests
 
 ```bash
-python app/main.py
+cd interviewace
+pytest -q
+ruff check .
 ```
 
-Open **http://localhost:8080** in your browser.
-
-### Deploy to Google Cloud Run
-
-```bash
-# Build with Cloud Build
-gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/interviewace .
-
-# Deploy
-gcloud run deploy interviewace \
-  --image gcr.io/YOUR_PROJECT_ID/interviewace \
-  --region us-central1 \
-  --platform managed \
-  --allow-unauthenticated \
-  --port 8080 \
-  --memory 1Gi \
-  --session-affinity \
-  --set-env-vars "GOOGLE_API_KEY=YOUR_KEY,GOOGLE_GENAI_USE_VERTEXAI=FALSE"
-```
+The suite stubs the ADK, so it runs without `google-adk` installed. It does **not** exercise the
+real Live API — verify that manually against a live key before deploying.
 
 ---
 
-## 📁 Project Structure
+## ☁️ Deploy to Cloud Run
+
+> **Cloud Run requires a billing account on the project**, even to use its free tier. If
+> you are running on a free-tier API key with no billing set up, running locally is your
+> zero-cost path — the app needs no GPU and no paid infrastructure. Free hosts that
+> support long-lived WebSockets (Hugging Face Spaces, Render, Fly.io) also work, since the
+> server is only a proxy to the Gemini API.
+
+Secrets go in Secret Manager, never in `--set-env-vars`.
+
+```bash
+# One-time setup
+printf '%s' "YOUR_GEMINI_API_KEY" | gcloud secrets create interviewace-api-key --data-file=-
+python -c "import secrets;print(secrets.token_urlsafe(48))" | \
+  gcloud secrets create interviewace-session-secret --data-file=-
+
+# Build and deploy
+PROJECT_ID=your-project ./interviewace/deploy/deploy.sh
+```
+
+Or with Terraform (Cloud Run, service account, Secret Manager, optional budget alert):
+
+```bash
+cd interviewace/deploy/terraform
+terraform init
+terraform apply -var="project_id=YOUR_PROJECT" -var="image=gcr.io/YOUR_PROJECT/interviewace:latest"
+```
+
+> ⚠️ The deployment is public and anonymous, so anyone who reaches it consumes your key's
+> quota. On a free-tier key that means 429s, not a bill. **If your project has billing
+> enabled, set a GCP budget alert** before going public. See [SECURITY.md](SECURITY.md).
+
+---
+
+## 📁 Project structure
 
 ```
 IntyerviewBit/
 ├── README.md
-├── cloudbuild.yaml                    # Google Cloud Build config
+├── SECURITY.md
+├── cloudbuild.yaml                  # Cloud Build -> Cloud Run, secrets from Secret Manager
+├── .github/workflows/ci.yml         # lint, tests, secret scan, docker build
 └── interviewace/
-    ├── Dockerfile                     # Cloud Run container
-    ├── .dockerignore
-    ├── .env.example
+    ├── Dockerfile
     ├── requirements.txt
+    ├── pyproject.toml
+    ├── .env.example
+    ├── ARCHITECTURE.md
+    ├── test_interviewace.py         # tool and session-isolation tests
+    ├── test_adk_events.py           # HTTP, auth, rate limit, WebSocket tests
+    ├── deploy/
+    │   ├── deploy.sh
+    │   └── terraform/
     └── app/
-        ├── main.py                    # FastAPI + WebSocket server
+        ├── __init__.py
+        ├── main.py                  # FastAPI, WebSocket bridge, auth, rate limits
+        ├── runtime_config.py        # model profiles, input validation, limits
+        ├── ws_manager.py            # strict session -> socket routing
         ├── interview_coach_agent/
-        │   ├── __init__.py
-        │   ├── agent.py               # ADK Agent definition (11 tools)
-        │   ├── prompts.py             # Agent persona & instructions
-        │   ├── tools.py               # All 10 custom tool implementations
-        │   └── grounding_data.py      # Verified coaching knowledge base
+        │   ├── agent.py             # ADK agent + google_search sub-agent
+        │   ├── prompts.py
+        │   ├── tools.py             # 15 tools, ToolContext-bound
+        │   └── grounding_data.py
         └── static/
-            ├── index.html             # Single-page app (Google Meet UI)
-            ├── favicon.ico
-            ├── css/
-            │   └── style.css          # Complete Meet-style CSS
+            ├── index.html
+            ├── css/style.css
             └── js/
-                ├── app.js             # Main application logic
-                ├── audio-player.js    # PCM audio playback engine
-                ├── audio-recorder.js  # Mic capture + PCM encoding
-                └── camera.js          # Webcam frame capture (1 fps)
+                ├── app.js
+                ├── audio-player.js
+                ├── audio-recorder.js
+                ├── camera.js
+                ├── dashboard.js
+                └── pcm-recorder-processor.js
 ```
 
 ---
@@ -267,37 +240,25 @@ IntyerviewBit/
 
 | Technology | Usage |
 |------------|-------|
-| **Google ADK** | Agent orchestration, tool execution, LiveRequestQueue |
-| **Gemini 2.5 Flash Native Audio** | Real-time voice interaction via Live API |
-| **Gemini Vision** | Body language analysis from webcam frames |
-| **Google Search** (ADK built-in) | Grounding to prevent hallucination |
-| **Google Cloud Run** | Serverless container hosting |
-| **FastAPI** | WebSocket server bridging browser ↔ ADK |
-| **Uvicorn** | ASGI server with WebSocket support |
-| **Vanilla JavaScript** | Frontend UI (no framework dependencies) |
-| **Web Audio API** | PCM audio recording and playback |
-| **MediaDevices API** | Camera frame capture |
+| **Google ADK** 1.27 | Agent orchestration, tools, `LiveRequestQueue`, `run_live()` |
+| **Gemini 2.5 Flash native audio** | Real-time voice via the Live API |
+| **Gemini vision** | Body-language observation from webcam frames |
+| **Google Search** (ADK built-in) | Grounding, via a dedicated research sub-agent |
+| **Cloud Run + Secret Manager** | Serverless hosting and secret storage |
+| **FastAPI / Uvicorn** | WebSocket server bridging browser ↔ ADK |
+| **Vanilla JavaScript** | Frontend, no framework |
+| **Web Audio API (AudioWorklet)** | Off-main-thread PCM capture and playback |
+
+### Data handling
+
+Audio and video are streamed to Google's Gemini API for live analysis and are **not recorded**
+by this application. Scores and transcripts live in the memory of the instance serving your
+session and are discarded when it expires. Nothing is written to disk or to a database.
 
 ---
 
-## 🏆 Hackathon Criteria Alignment
+## 👥 Built by
 
-| Criterion | How InterviewAce Addresses It |
-|-----------|-------------------------------|
-| **Beyond the text box** | Fully voice-driven. Camera vision. No text input needed at any point. |
-| **Live API usage** | Native `bidiGenerateContent` streaming via ADK `LiveRequestQueue` |
-| **Multimodal input** | Audio (PCM 16kHz) + Vision (JPEG 1fps) streamed simultaneously |
-| **Tool use** | 11 tools across 3 tiers — all called autonomously by the model |
-| **Grounding** | `google_search` (ADK built-in) + `fetch_grounding_data` (local KB) |
-| **Google Cloud** | Deployed on Cloud Run with Dockerfile + cloudbuild.yaml |
-| **User experience** | Pixel-perfect Google Meet replica with real-time analytics |
-
----
-
-## 👥 Built by: 
-
-Built with ❤️ for the **Gemini Live Agent Challenge** by Sameer
-
----
+Built for the **Gemini Live Agent Challenge** by Sameer.
 
 *Powered by Google ADK · Gemini Live API · Google Cloud Run*

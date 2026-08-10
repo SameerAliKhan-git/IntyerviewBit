@@ -1,13 +1,34 @@
-"""InterviewAce analytics and coaching tools."""
+"""InterviewAce analytics and coaching tools.
+
+Session binding
+---------------
+Every tool that touches session state receives its ``session_id`` from the ADK
+``ToolContext`` (seeded server-side at connect time), never from a model-supplied
+argument. A tool invoked without a resolvable session is a hard no-op that returns
+an error payload; it must never fall back to "some other active session", because
+that silently writes one candidate's analytics into another candidate's dashboard.
+"""
 
 from __future__ import annotations
 
-import os
+import hashlib
 import random
 import re
+import time
+from collections import deque
 from datetime import datetime, timezone
 from statistics import mean
 from typing import Any
+
+try:  # pragma: no cover - only taken when google-adk is installed
+    from google.adk.tools import ToolContext
+except ImportError:  # pragma: no cover - unit tests run without the ADK installed
+
+    class ToolContext:  # type: ignore[no-redef]
+        """Minimal stand-in so annotations resolve when ADK is absent."""
+
+        state: dict[str, Any]
+
 
 try:
     from ..ws_manager import send_tool_result_sync
@@ -19,12 +40,30 @@ except ImportError:  # pragma: no cover - supports running from app/ directly
 
 from .grounding_data import GROUNDING_KNOWLEDGE, IMPROVEMENT_TIPS, INTERVIEW_QUESTIONS
 
-_USE_FIRESTORE = os.getenv("USE_FIRESTORE", "false").lower() == "true"
-_firestore_client = None
+# --------------------------------------------------------------------------------------
+# Bounded in-process state
+# --------------------------------------------------------------------------------------
+# This process holds session analytics in memory. It is bounded on two axes so a long
+# running Cloud Run instance cannot grow without limit: idle sessions expire after
+# _SESSION_TTL_SECONDS, and the newest _MAX_SESSIONS are kept if that is still exceeded.
+
+_SESSION_TTL_SECONDS = 60 * 60
+_MAX_SESSIONS = 500
+_MAX_ARCHIVED_REPORTS = 200
+_MAX_TRANSCRIPT_CHARS = 20_000
 
 _sessions: dict[str, dict[str, Any]] = {}
 _recordings: dict[str, list[dict[str, Any]]] = {}
-_archived_reports: list[dict[str, Any]] = []
+_archived_reports: deque[dict[str, Any]] = deque(maxlen=_MAX_ARCHIVED_REPORTS)
+
+SESSION_UNAVAILABLE = {
+    "status": "error",
+    "error": "session_unavailable",
+    "message": (
+        "No interview session is bound to this call, so nothing was recorded. "
+        "Continue the conversation normally."
+    ),
+}
 
 _ROLE_DEFAULT_CATEGORY = {
     "software_engineer": "technical",
@@ -91,24 +130,33 @@ _COMPANY_HINTS = {
         "Stress craft, quality bar, and attention to details that affect user trust.",
         "Balance innovation with reliability and cross-functional alignment.",
     ],
+    "microsoft": [
+        "Show a growth mindset and what you changed after a setback.",
+        "Connect technical decisions to customer success and team collaboration.",
+    ],
+    "netflix": [
+        "Demonstrate independent judgment and candour about trade-offs you owned.",
+        "Show high impact per decision rather than volume of activity.",
+    ],
     "general": [
         "Stay concise and practical, then back up your story with evidence.",
     ],
 }
 
+# Ordered longest-first so multi-word phrases are counted before their constituent words.
 _FILLER_PATTERNS = [
-    "um",
-    "uh",
-    "like",
     "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "so yeah",
     "basically",
     "literally",
-    "right",
-    "so yeah",
-    "kind of",
-    "sort of",
-    "i mean",
     "actually",
+    "right",
+    "like",
+    "um",
+    "uh",
 ]
 
 _MILESTONES = {
@@ -121,16 +169,9 @@ _MILESTONES = {
 }
 
 
-def _get_firestore():
-    global _firestore_client
-    if _firestore_client is None and _USE_FIRESTORE:
-        try:
-            from google.cloud import firestore
-
-            _firestore_client = firestore.Client()
-        except Exception as exc:  # pragma: no cover - best effort only
-            print(f"[WARN] Firestore not available: {exc}")
-    return _firestore_client
+# --------------------------------------------------------------------------------------
+# Session plumbing
+# --------------------------------------------------------------------------------------
 
 
 def _utc_now() -> str:
@@ -141,7 +182,7 @@ def _clamp(value: float, minimum: int = 0, maximum: int = 100) -> int:
     return max(minimum, min(maximum, round(value)))
 
 
-def _safe_mean(values: list[int | float]) -> int:
+def _safe_mean(values: list[Any]) -> int:
     return round(mean(values)) if values else 0
 
 
@@ -156,52 +197,83 @@ def _trend_label(current: int, previous: int | None) -> str:
     return "same_as_previous"
 
 
-def _resolve_session_id(session_id: str) -> str:
-    if session_id == "default" or session_id not in _sessions:
+def _new_state() -> dict[str, Any]:
+    return {
+        "feedback": [],
+        "fillers": [],
+        "body": [],
+        "voice": [],
+        "star": [],
+        "fusion": [],
+        "emotion": [],
+        "engagement": [],
+        "reports": [],
+        "context": {},
+        "milestones": [],
+        "asked_questions": [],
+        "transcript": [],
+        "pending_transcript": [],
+        "last_touched": time.monotonic(),
+    }
+
+
+def _prune_sessions() -> None:
+    """Drops idle sessions, then caps total retained sessions."""
+
+    now = time.monotonic()
+    expired = [
+        key
+        for key, state in _sessions.items()
+        if now - state.get("last_touched", now) > _SESSION_TTL_SECONDS
+    ]
+    for key in expired:
+        _sessions.pop(key, None)
+        _recordings.pop(key, None)
+
+    if len(_sessions) > _MAX_SESSIONS:
+        ordered = sorted(_sessions.items(), key=lambda item: item[1].get("last_touched", 0.0))
+        for key, _ in ordered[: len(_sessions) - _MAX_SESSIONS]:
+            _sessions.pop(key, None)
+            _recordings.pop(key, None)
+
+
+def _session_id_from_context(tool_context: ToolContext | None) -> str | None:
+    """Resolves the session this tool call belongs to, or None.
+
+    Resolution is strictly scoped to the invoking context. There is deliberately no
+    "pick an active session" fallback: mis-attributing analytics across concurrent
+    candidates is worse than recording nothing.
+    """
+
+    if tool_context is None:
+        return None
+
+    state = getattr(tool_context, "state", None)
+    if isinstance(state, dict) or hasattr(state, "get"):
         try:
-            import sys
-            if "app.ws_manager" in sys.modules:
-                from app.ws_manager import _active_websockets
-                if _active_websockets:
-                    return next(iter(_active_websockets.keys()))
-        except Exception:
-            pass
-    return session_id
+            session_id = state.get("session_id")
+        except Exception:  # pragma: no cover - defensive against exotic state objects
+            session_id = None
+        if isinstance(session_id, str) and session_id:
+            return session_id
+
+    invocation = getattr(tool_context, "_invocation_context", None)
+    session = getattr(invocation, "session", None)
+    session_id = getattr(session, "id", None)
+    if isinstance(session_id, str) and session_id:
+        return session_id
+
+    return None
 
 
 def _get_session_state(session_id: str) -> dict[str, Any]:
-    session_id = _resolve_session_id(session_id)
-    existing = _sessions.get(session_id)
-    if isinstance(existing, list):
-        _sessions[session_id] = {
-            "feedback": existing,
-            "fillers": [],
-            "body": [],
-            "voice": [],
-            "star": [],
-            "fusion": [],
-            "emotion": [],
-            "engagement": [],
-            "reports": [],
-            "context": {},
-            "milestones": [],
-        }
-
-    if session_id not in _sessions:
-        _sessions[session_id] = {
-            "feedback": [],
-            "fillers": [],
-            "body": [],
-            "voice": [],
-            "star": [],
-            "fusion": [],
-            "emotion": [],
-            "engagement": [],
-            "reports": [],
-            "context": {},
-            "milestones": [],
-        }
-    return _sessions[session_id]
+    _prune_sessions()
+    state = _sessions.get(session_id)
+    if state is None:
+        state = _new_state()
+        _sessions[session_id] = state
+    state["last_touched"] = time.monotonic()
+    return state
 
 
 def _record_bucket(session_id: str, bucket: str) -> list[dict[str, Any]]:
@@ -210,23 +282,65 @@ def _record_bucket(session_id: str, bucket: str) -> list[dict[str, Any]]:
     return state[bucket]
 
 
-def _set_context(
+def seed_session_context(
     session_id: str,
     *,
-    role: str | None = None,
-    company_style: str | None = None,
-    difficulty: str | None = None,
-    industry: str | None = None,
+    role: str = "general",
+    company_style: str = "general",
+    difficulty: str = "medium",
+    industry: str = "general",
 ) -> None:
+    """Records the interview parameters chosen by the candidate before the call starts.
+
+    These come from the connection handshake, not from the model, so role/company/
+    difficulty are always correct rather than whatever the model happened to infer.
+    """
+
     context = _get_session_state(session_id)["context"]
-    if role:
-        context["role"] = role
-    if company_style:
-        context["company_style"] = company_style
-    if difficulty:
-        context["difficulty"] = difficulty
-    if industry:
-        context["industry"] = industry
+    context["role"] = role or "general"
+    context["company_style"] = company_style or "general"
+    context["difficulty"] = difficulty or "medium"
+    context["industry"] = industry or "general"
+
+
+def record_candidate_speech(session_id: str, text: str) -> None:
+    """Appends a real transcription chunk of the candidate's speech.
+
+    Called by the WebSocket bridge with Gemini's ``input_transcription`` output. This is
+    the ground truth used for filler-word detection, rather than the model's paraphrase
+    of what it thinks the candidate said.
+    """
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return
+    state = _get_session_state(session_id)
+    state["transcript"].append(cleaned)
+    state["pending_transcript"].append(cleaned)
+
+    # Keep the rolling transcript bounded for long sessions.
+    while sum(len(chunk) for chunk in state["transcript"]) > _MAX_TRANSCRIPT_CHARS:
+        state["transcript"].pop(0)
+
+
+def take_pending_transcript(session_id: str) -> str:
+    """Returns and clears the candidate speech captured since the last scored turn."""
+
+    state = _get_session_state(session_id)
+    pending = " ".join(state["pending_transcript"]).strip()
+    state["pending_transcript"] = []
+    return pending
+
+
+def get_full_transcript(session_id: str) -> list[str]:
+    return list(_get_session_state(session_id)["transcript"])
+
+
+def clear_session(session_id: str) -> None:
+    """Releases all state for a finished session."""
+
+    _sessions.pop(session_id, None)
+    _recordings.pop(session_id, None)
 
 
 def _broadcast(session_id: str, tool_name: str, payload: dict[str, Any]) -> None:
@@ -234,6 +348,11 @@ def _broadcast(session_id: str, tool_name: str, payload: dict[str, Any]) -> None
         send_tool_result_sync(session_id, tool_name, payload)
     except Exception:  # pragma: no cover - UI transport is best effort
         pass
+
+
+# --------------------------------------------------------------------------------------
+# Derived analytics (pure functions over session state)
+# --------------------------------------------------------------------------------------
 
 
 def _heatmap(session_id: str) -> list[dict[str, Any]]:
@@ -247,14 +366,18 @@ def _heatmap(session_id: str) -> list[dict[str, Any]]:
             "content": entry["content"],
             "star_score": entry["star_score"],
         }
-        weakest = min(area_scores, key=area_scores.get)
+        weakest = min(area_scores, key=lambda key: area_scores[key])
         heatmap.append(
             {
                 "question_number": entry["question_number"],
                 "overall": entry["overall"],
                 "focus_area": weakest,
                 "focus_score": area_scores[weakest],
-                "intensity": "high" if entry["overall"] >= 85 else "medium" if entry["overall"] >= 70 else "low",
+                "intensity": "high"
+                if entry["overall"] >= 85
+                else "medium"
+                if entry["overall"] >= 70
+                else "low",
             }
         )
     return heatmap
@@ -285,6 +408,19 @@ def _competency_radar(session_id: str) -> dict[str, int]:
     }
 
 
+def _scored_radar(session_id: str) -> dict[str, int]:
+    """Radar restricted to competencies that actually have observations.
+
+    ``_competency_radar`` reports 0 for un-observed areas (voice/engagement before any
+    such tool has fired). Ranking "weakest area" over those zeros always names an area
+    the candidate was never measured on, so the report ranks only scored areas.
+    """
+
+    radar = _competency_radar(session_id)
+    scored = {key: value for key, value in radar.items() if value > 0}
+    return scored or radar
+
+
 def _milestones_for(session_id: str) -> list[dict[str, str]]:
     state = _get_session_state(session_id)
     feedback = state["feedback"]
@@ -300,7 +436,7 @@ def _milestones_for(session_id: str) -> list[dict[str, str]]:
         awards.add("steady_voice")
     if star and _safe_mean([item["score"] for item in star]) >= 85:
         awards.add("star_storyteller")
-    if filler_total <= max(2, len(feedback) * 2) and feedback:
+    if feedback and state["fillers"] and filler_total <= max(2, len(feedback) * 2):
         awards.add("low_fillers")
     if len(engagement) >= 2 and _safe_mean([item["engagement_score"] for item in engagement[-2:]]) >= 80:
         awards.add("engaged_presence")
@@ -324,7 +460,7 @@ def _industry_specific_coaching(session_id: str) -> list[str]:
 
 
 def _learning_path(session_id: str) -> list[dict[str, str]]:
-    radar = _competency_radar(session_id)
+    radar = _scored_radar(session_id)
     ranked_areas = sorted(radar.items(), key=lambda item: item[1])
     focus_modules = []
 
@@ -356,7 +492,9 @@ def _previous_comparison(session_id: str, average_score: int) -> dict[str, Any] 
     for report in reversed(_archived_reports):
         if report["session_id"] == session_id:
             continue
-        if report.get("role") == context.get("role") and report.get("company_style") == context.get("company_style"):
+        if report.get("role") == context.get("role") and report.get("company_style") == context.get(
+            "company_style"
+        ):
             delta = average_score - report.get("average_score", 0)
             return {
                 "previous_session_id": report["session_id"],
@@ -367,10 +505,67 @@ def _previous_comparison(session_id: str, average_score: int) -> dict[str, Any] 
     return None
 
 
-def get_session_dashboard(session_id: str) -> dict[str, Any]:
-    """Returns a UI-friendly analytics snapshot for the live dashboard."""
+# --------------------------------------------------------------------------------------
+# Server-side API (session_id supplied by the caller, not the model)
+# --------------------------------------------------------------------------------------
 
-    history = get_session_history(session_id)
+
+def build_session_history(session_id: str) -> dict[str, Any]:
+    """Aggregated session history. Safe to call from HTTP handlers."""
+
+    state = _get_session_state(session_id)
+    feedback = state["feedback"]
+    if not feedback:
+        return {
+            "session_id": session_id,
+            "total_questions": 0,
+            "scores": [],
+            "average_score": 0,
+            "latest_score": 0,
+            "best_score": 0,
+            "improvement": 0,
+            "total_filler_words": sum(item["count"] for item in state["fillers"]),
+            "history": [],
+            "message": "No history yet. Let's begin the interview!",
+        }
+
+    scores = [item["overall"] for item in feedback]
+    emotion_scores = [item["stress_score"] for item in state["emotion"]]
+    engagement_scores = [item["engagement_score"] for item in state["engagement"]]
+    total_fillers = sum(item["count"] for item in state["fillers"])
+
+    return {
+        "session_id": session_id,
+        "total_questions": len(feedback),
+        "scores": scores,
+        "average_score": _safe_mean(scores),
+        "best_score": max(scores),
+        "latest_score": scores[-1],
+        "improvement": scores[-1] - scores[0] if len(scores) > 1 else 0,
+        "total_filler_words": total_fillers,
+        "body_language_observations": len(state["body"]),
+        "voice_observations": len(state["voice"]),
+        "star_analyses": len(state["star"]),
+        "fusion_analyses": len(state["fusion"]),
+        "history": feedback,
+        "emotion_summary": {
+            "average_stress": _safe_mean(emotion_scores),
+            "latest_emotion": state["emotion"][-1]["emotion_label"] if state["emotion"] else "unknown",
+        },
+        "engagement_summary": {
+            "average_engagement": _safe_mean(engagement_scores),
+            "latest_engagement": engagement_scores[-1] if engagement_scores else 0,
+        },
+        "competency_radar": _competency_radar(session_id),
+        "heatmap": _heatmap(session_id),
+        "milestones": _milestones_for(session_id),
+    }
+
+
+def build_session_dashboard(session_id: str) -> dict[str, Any]:
+    """UI-friendly analytics snapshot. Safe to call from HTTP handlers."""
+
+    history = build_session_history(session_id)
     if history["total_questions"] == 0:
         return {
             "session_id": session_id,
@@ -398,212 +593,114 @@ def get_session_dashboard(session_id: str) -> dict[str, Any]:
     }
 
 
-def get_interview_question(
-    role: str,
-    difficulty: str = "medium",
-    category: str = "behavioral",
-    company_style: str = "general",
-    industry: str = "general",
-    weak_area: str = "",
-    session_id: str = "default",
-) -> dict[str, Any]:
-    """Selects an adaptive interview question for the candidate."""
+def build_session_report(session_id: str) -> dict[str, Any]:
+    """Builds the end-of-interview report deterministically.
 
-    _set_context(
-        session_id,
-        role=role or "general",
-        company_style=company_style or "general",
-        difficulty=difficulty or "medium",
-        industry=industry or "general",
-    )
+    Exposed to both the model (via ``generate_session_report``) and the HTTP layer, so
+    ending a call never depends on the model choosing to call a tool in time.
+    """
 
-    if not category or category == "adaptive":
-        category = _ROLE_DEFAULT_CATEGORY.get(role, "behavioral")
-        if weak_area in {"star_method", "confidence", "clarity"}:
-            category = "behavioral"
-        elif weak_area in {"content_quality", "software_design"}:
-            category = "technical"
+    history = build_session_history(session_id)
+    if history.get("total_questions", 0) == 0:
+        return {
+            "session_id": session_id,
+            "total_questions_answered": 0,
+            "average_score": 0,
+            "report": "No questions were scored in this session.",
+            "performance_tier": "Not enough data",
+            "recommendations": [
+                "Answer at least three questions for a meaningful coaching report.",
+            ],
+        }
 
-    company_questions = {
-        "amazon": [
-            {
-                "text": "Tell me about a time you had to deliver with limited resources.",
-                "evaluation_criteria": "Ownership, prioritization, and frugality.",
-                "difficulty": "medium",
-                "category": "behavioral",
-                "role": "general",
-            },
-            {
-                "text": "Describe a disagreement with a leader and how you handled it.",
-                "evaluation_criteria": "Respectful challenge, evidence, and follow-through.",
-                "difficulty": "hard",
-                "category": "behavioral",
-                "role": "general",
-            },
-        ],
-        "google": [
-            {
-                "text": "Tell me about the hardest technical problem you untangled recently.",
-                "evaluation_criteria": "Structured thinking, technical depth, and measurable impact.",
-                "difficulty": "hard",
-                "category": "technical",
-                "role": "software_engineer",
-            },
-            {
-                "text": "Describe a time you improved a process in a scalable way.",
-                "evaluation_criteria": "Learning agility, collaboration, and systems impact.",
-                "difficulty": "medium",
-                "category": "behavioral",
-                "role": "general",
-            },
-        ],
-        "meta": [
-            {
-                "text": "Tell me about a time you shipped quickly and accepted a trade-off to learn faster.",
-                "evaluation_criteria": "Speed, judgment, and iteration quality.",
-                "difficulty": "medium",
-                "category": "behavioral",
-                "role": "general",
-            }
-        ],
-        "apple": [
-            {
-                "text": "Tell me about a moment when attention to detail changed the outcome of your work.",
-                "evaluation_criteria": "Craft, quality standards, and customer trust.",
-                "difficulty": "medium",
-                "category": "behavioral",
-                "role": "general",
-            }
-        ],
-    }
-
-    pool = [
-        item
-        for item in company_questions.get(company_style, [])
-        if item["difficulty"] == difficulty
-        and item["category"] == category
-        and item["role"] in {role, "general"}
-    ]
-    if not pool:
-        pool = [
-            item
-            for item in INTERVIEW_QUESTIONS
-            if item["difficulty"] == difficulty
-            and item["category"] == category
-            and item["role"] in {role, "general"}
-        ]
-    if not pool:
-        pool = [item for item in INTERVIEW_QUESTIONS if item["role"] == "general"]
-
-    selection = random.choice(pool)
-    return {
-        "question": selection["text"],
-        "evaluation_criteria": selection["evaluation_criteria"],
-        "role": role,
-        "difficulty": difficulty,
-        "category": category,
-        "company_style": company_style,
-        "industry": industry,
-        "focus_area": weak_area or "balanced",
-        "coaching_hint": _industry_specific_coaching(session_id)[0],
-    }
-
-
-def save_session_feedback(
-    session_id: str,
-    question_number: int,
-    confidence_score: int,
-    clarity_score: int,
-    body_language_score: int,
-    content_score: int,
-    star_score: int,
-    filler_word_count: int,
-    feedback_summary: str,
-    strengths: str,
-    improvements: str,
-    role: str = "general",
-    company_style: str = "general",
-    difficulty: str = "medium",
-    industry: str = "general",
-) -> dict[str, Any]:
-    """Saves a scored answer and returns a trend-aware payload."""
-
-    _set_context(
-        session_id,
-        role=role,
-        company_style=company_style,
-        difficulty=difficulty,
-        industry=industry,
-    )
-
-    overall = _clamp(
-        confidence_score * 0.20
-        + clarity_score * 0.20
-        + body_language_score * 0.15
-        + content_score * 0.25
-        + star_score * 0.20
-    )
-
-    feedback_bucket = _record_bucket(session_id, "feedback")
-    previous_score = feedback_bucket[-1]["overall"] if feedback_bucket else None
-    entry = {
-        "question_number": question_number,
-        "confidence": confidence_score,
-        "clarity": clarity_score,
-        "body_language": body_language_score,
-        "content": content_score,
-        "star_score": star_score,
-        "filler_word_count": filler_word_count,
-        "overall": overall,
-        "feedback": feedback_summary,
-        "strengths": strengths,
-        "improvements": improvements,
-        "timestamp": _utc_now(),
-    }
-    feedback_bucket.append(entry)
-
-    history = get_session_history(session_id)
-    milestones = _milestones_for(session_id)
+    context = _get_session_state(session_id)["context"]
+    average_score = history["average_score"]
     radar = _competency_radar(session_id)
-    weakest_area = min(radar, key=radar.get)
+    scored = _scored_radar(session_id)
+    strongest_area = max(scored, key=lambda key: scored[key])
+    weakest_area = min(scored, key=lambda key: scored[key])
+    comparison = _previous_comparison(session_id, average_score)
+    filler_total = history["total_filler_words"]
 
-    response = {
-        "status": "saved",
-        "question_number": question_number,
-        "overall_score": overall,
-        "confidence": confidence_score,
-        "clarity": clarity_score,
-        "body_language": body_language_score,
-        "content": content_score,
-        "star_score": star_score,
-        "filler_word_count": filler_word_count,
-        "trend": _trend_label(overall, previous_score),
-        "total_questions_answered": len(feedback_bucket),
-        "new_milestones": milestones,
-        "weakest_area": weakest_area,
-        "dashboard": get_session_dashboard(session_id),
-        "history_snapshot": {
-            "average_score": history["average_score"],
-            "latest_score": history["latest_score"],
+    performance_tier = (
+        "Excellent - Interview Ready"
+        if average_score >= 85
+        else "Good - Minor Refinements Needed"
+        if average_score >= 72
+        else "Developing - Focused Practice Recommended"
+        if average_score >= 55
+        else "Building Foundation - Keep Practicing"
+    )
+
+    report = {
+        "session_id": session_id,
+        "role": context.get("role", "general"),
+        "company_style": context.get("company_style", "general"),
+        "industry": context.get("industry", "general"),
+        "total_questions_answered": history["total_questions"],
+        "average_score": average_score,
+        "best_score": history["best_score"],
+        "score_improvement": history["improvement"],
+        "performance_tier": performance_tier,
+        "confidence": radar["confidence"],
+        "clarity": radar["clarity"],
+        "body_language": radar["body_language"],
+        "content": radar["content"],
+        "star_score": radar["star"],
+        "voice_score": radar["voice"],
+        "engagement_score": radar["engagement"],
+        "strongest_area": strongest_area.replace("_", " ").title(),
+        "weakest_area": weakest_area.replace("_", " ").title(),
+        "filler_word_summary": {
+            "total": filler_total,
+            "rating": "Excellent" if filler_total == 0 else "Good" if filler_total <= 5 else "Needs Work",
+            "measured_from": "gemini_input_transcription",
         },
+        "heatmap": _heatmap(session_id),
+        "competency_radar": radar,
+        "milestones": _milestones_for(session_id),
+        "learning_path": _learning_path(session_id),
+        "study_plan": _study_plan(session_id),
+        "industry_specific_coaching": _industry_specific_coaching(session_id),
+        "comparison_to_previous_session": comparison,
+        "strengths": (
+            f"Your strongest area was {strongest_area.replace('_', ' ')}."
+            " Keep leaning into that when answering tougher questions."
+        ),
+        "improvements": (
+            f"Your biggest gain opportunity is {weakest_area.replace('_', ' ')}."
+            " Focus on one tighter, more measurable answer structure next session."
+        ),
+        "recommendations": [
+            f"Prioritize {weakest_area.replace('_', ' ')} in the next practice block.",
+            f"Keep using {strongest_area.replace('_', ' ')} as a strength signal in interviews.",
+            f"Filler usage total: {filler_total}. Aim to reduce it by 30 percent next session.",
+            "Run one timed mock focused on concise, high-impact stories.",
+        ],
     }
-    _broadcast(session_id, "save_session_feedback", response)
-    return response
+
+    _get_session_state(session_id)["reports"].append(report)
+    _archived_reports.append(report)
+    return report
 
 
-def detect_filler_words(session_id: str, transcribed_text: str, question_number: int) -> dict[str, Any]:
-    """Detects filler phrases in the transcribed answer."""
+def count_filler_words(text: str) -> dict[str, Any]:
+    """Counts filler phrases in a transcript. Pure function, no session state."""
 
-    text_lower = transcribed_text.lower()
+    text_lower = (text or "").lower()
     detected: dict[str, int] = {}
-
+    # Blank out longer phrases as they are matched so "you know" is not also counted
+    # as a bare "know"-adjacent single filler, and "like" inside "sort of like" is
+    # attributed once.
     for filler in _FILLER_PATTERNS:
-        count = len(re.findall(rf"\b{re.escape(filler)}\b", text_lower))
-        if count:
-            detected[filler] = count
+        pattern = rf"\b{re.escape(filler)}\b"
+        matches = re.findall(pattern, text_lower)
+        if matches:
+            detected[filler] = len(matches)
+            text_lower = re.sub(pattern, " ", text_lower)
 
     total_count = sum(detected.values())
-    word_count = max(1, len(re.findall(r"\b\w+\b", transcribed_text)))
+    word_count = max(1, len(re.findall(r"\b\w+\b", text or "")))
     filler_rate = round((total_count / word_count) * 100, 1)
 
     if total_count == 0:
@@ -619,29 +716,415 @@ def detect_filler_words(session_id: str, transcribed_text: str, question_number:
         rating = "needs_improvement"
         tip = "High filler usage detected. Slow down and let silence do the work."
 
-    _record_bucket(session_id, "fillers").append(
-        {
-            "question_number": question_number,
-            "count": total_count,
-            "detected": detected,
-            "filler_rate_percent": filler_rate,
-        }
-    )
-
-    response = {
-        "question_number": question_number,
+    return {
         "total_filler_words": total_count,
         "detected_fillers": detected,
         "filler_rate_percent": filler_rate,
         "rating": rating,
         "coaching_tip": tip,
+        "word_count": word_count,
     }
-    _broadcast(session_id, "detect_filler_words", response)
+
+
+def analyze_pending_speech(session_id: str, question_number: int) -> dict[str, Any] | None:
+    """Scores filler usage for the candidate's latest answer from the real transcript.
+
+    Returns None when nothing was transcribed since the previous turn.
+    """
+
+    transcript = take_pending_transcript(session_id)
+    if not transcript:
+        return None
+
+    stats = count_filler_words(transcript)
+    _record_bucket(session_id, "fillers").append(
+        {
+            "question_number": question_number,
+            "count": stats["total_filler_words"],
+            "detected": stats["detected_fillers"],
+            "filler_rate_percent": stats["filler_rate_percent"],
+            "source": "input_transcription",
+            "timestamp": _utc_now(),
+        }
+    )
+
+    payload = {
+        "question_number": question_number,
+        "source": "input_transcription",
+        **stats,
+    }
+    _broadcast(session_id, "detect_filler_words", payload)
+    return payload
+
+
+def _select_question(
+    session_id: str,
+    role: str,
+    difficulty: str,
+    category: str,
+    company_style: str,
+) -> dict[str, Any]:
+    """Picks a question the candidate has not been asked yet in this session.
+
+    Filters are relaxed one at a time (category, then difficulty, then role) rather than
+    collapsing straight to "any general question", so a narrow request still degrades to
+    something close to what was asked for.
+    """
+
+    state = _get_session_state(session_id)
+    asked: list[str] = state["asked_questions"]
+
+    def question_id(item: dict[str, Any]) -> str:
+        return hashlib.sha1(item["text"].encode("utf-8")).hexdigest()[:12]
+
+    pool = COMPANY_QUESTIONS.get(company_style, []) + INTERVIEW_QUESTIONS
+
+    def matching(predicate) -> list[dict[str, Any]]:
+        return [item for item in pool if predicate(item) and question_id(item) not in asked]
+
+    candidates = (
+        matching(
+            lambda i: i["difficulty"] == difficulty
+            and i["category"] == category
+            and i["role"] in {role, "general"}
+        )
+        or matching(lambda i: i["difficulty"] == difficulty and i["role"] in {role, "general"})
+        or matching(lambda i: i["category"] == category and i["role"] in {role, "general"})
+        or matching(lambda i: i["role"] in {role, "general"})
+        or matching(lambda i: True)
+    )
+
+    if not candidates:
+        # Every question has been used; start a fresh rotation.
+        state["asked_questions"] = []
+        candidates = [item for item in pool if item["role"] in {role, "general"}] or pool
+
+    selection = random.choice(candidates)
+    state["asked_questions"].append(question_id(selection))
+    return selection
+
+
+COMPANY_QUESTIONS: dict[str, list[dict[str, Any]]] = {
+    "amazon": [
+        {
+            "text": "Tell me about a time you had to deliver with limited resources.",
+            "evaluation_criteria": "Ownership, prioritization, and frugality.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe a disagreement with a leader and how you handled it.",
+            "evaluation_criteria": "Respectful challenge, evidence, and follow-through.",
+            "difficulty": "hard",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Tell me about a decision you made with incomplete data. What did you do to reduce the risk?",
+            "evaluation_criteria": "Bias for action, judgment, and how they de-risked the call.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe the highest standard you have ever set for your team. How did you hold the bar?",
+            "evaluation_criteria": "Insist on highest standards, follow-through, and measurable quality.",
+            "difficulty": "hard",
+            "category": "leadership",
+            "role": "general",
+        },
+        {
+            "text": "Tell me about a customer problem you personally dug into. What did you find?",
+            "evaluation_criteria": "Customer obsession and depth of investigation.",
+            "difficulty": "easy",
+            "category": "behavioral",
+            "role": "general",
+        },
+    ],
+    "google": [
+        {
+            "text": "Tell me about the hardest technical problem you untangled recently.",
+            "evaluation_criteria": "Structured thinking, technical depth, and measurable impact.",
+            "difficulty": "hard",
+            "category": "technical",
+            "role": "software_engineer",
+        },
+        {
+            "text": "Describe a time you improved a process in a scalable way.",
+            "evaluation_criteria": "Learning agility, collaboration, and systems impact.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Walk me through how you would debug a service whose latency doubled overnight.",
+            "evaluation_criteria": "Systematic hypothesis testing and use of telemetry.",
+            "difficulty": "medium",
+            "category": "technical",
+            "role": "software_engineer",
+        },
+        {
+            "text": "Tell me about something technical you learned recently and how you applied it.",
+            "evaluation_criteria": "Learning agility and practical application.",
+            "difficulty": "easy",
+            "category": "technical",
+            "role": "general",
+        },
+    ],
+    "meta": [
+        {
+            "text": "Tell me about a time you shipped quickly and accepted a trade-off to learn faster.",
+            "evaluation_criteria": "Speed, judgment, and iteration quality.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe the biggest bet you have made on an ambiguous problem.",
+            "evaluation_criteria": "Impact focus, conviction, and handling of ambiguity.",
+            "difficulty": "hard",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "What is a project where you had to influence people who did not report to you?",
+            "evaluation_criteria": "Influence without authority and openness.",
+            "difficulty": "easy",
+            "category": "behavioral",
+            "role": "general",
+        },
+    ],
+    "apple": [
+        {
+            "text": "Tell me about a moment when attention to detail changed the outcome of your work.",
+            "evaluation_criteria": "Craft, quality standards, and customer trust.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe a time you refused to ship something. What was the cost and was it worth it?",
+            "evaluation_criteria": "Quality bar, conviction, and cross-functional handling.",
+            "difficulty": "hard",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "What is a small detail in a product you use that you think is exceptional, and why?",
+            "evaluation_criteria": "Product taste and articulation of craft.",
+            "difficulty": "easy",
+            "category": "behavioral",
+            "role": "general",
+        },
+    ],
+    "microsoft": [
+        {
+            "text": "Tell me about a failure that changed how you work.",
+            "evaluation_criteria": "Growth mindset, specific behaviour change, and learning.",
+            "difficulty": "medium",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe a time you partnered across teams to unblock a customer.",
+            "evaluation_criteria": "Collaboration and customer success orientation.",
+            "difficulty": "easy",
+            "category": "behavioral",
+            "role": "general",
+        },
+    ],
+    "netflix": [
+        {
+            "text": "Tell me about a decision you made alone that you would defend to a room of skeptics.",
+            "evaluation_criteria": "Independent judgment, candour, and impact.",
+            "difficulty": "hard",
+            "category": "behavioral",
+            "role": "general",
+        },
+        {
+            "text": "Describe feedback you gave that was hard to deliver. How did you frame it?",
+            "evaluation_criteria": "Candour, communication, and follow-through.",
+            "difficulty": "medium",
+            "category": "leadership",
+            "role": "general",
+        },
+    ],
+}
+
+
+# --------------------------------------------------------------------------------------
+# Model-facing tools (session_id is injected, never a model argument)
+# --------------------------------------------------------------------------------------
+
+
+def get_interview_question(
+    tool_context: ToolContext,
+    category: str = "adaptive",
+    weak_area: str = "",
+) -> dict[str, Any]:
+    """Selects the next interview question for this candidate.
+
+    The role, company style, and difficulty come from the candidate's own session setup,
+    so you do not need to supply them. Questions already asked in this session are never
+    repeated.
+
+    Args:
+        category: One of "behavioral", "technical", "situational", "leadership", or
+            "adaptive" to let the coach pick based on the role and the weak area.
+        weak_area: Optional competency to target, e.g. "star_method" or "confidence".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
+
+    context = _get_session_state(session_id)["context"]
+    role = context.get("role", "general")
+    company_style = context.get("company_style", "general")
+    difficulty = context.get("difficulty", "medium")
+    industry = context.get("industry", "general")
+
+    if not category or category == "adaptive":
+        category = _ROLE_DEFAULT_CATEGORY.get(role, "behavioral")
+        if weak_area in {"star_method", "confidence", "clarity"}:
+            category = "behavioral"
+        elif weak_area in {"content_quality", "software_design"}:
+            category = "technical"
+
+    selection = _select_question(session_id, role, difficulty, category, company_style)
+    return {
+        "question": selection["text"],
+        "evaluation_criteria": selection["evaluation_criteria"],
+        "role": role,
+        "difficulty": difficulty,
+        "category": selection["category"],
+        "company_style": company_style,
+        "industry": industry,
+        "focus_area": weak_area or "balanced",
+        "coaching_hint": _industry_specific_coaching(session_id)[0],
+    }
+
+
+def save_session_feedback(
+    tool_context: ToolContext,
+    question_number: int,
+    confidence_score: int,
+    clarity_score: int,
+    body_language_score: int,
+    content_score: int,
+    star_score: int,
+    feedback_summary: str,
+    strengths: str,
+    improvements: str,
+) -> dict[str, Any]:
+    """Scores the candidate's most recent answer and updates their live dashboard.
+
+    Filler words are measured server-side from the real transcript, so do not pass a
+    filler count. Role, company, and difficulty are taken from the session.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        confidence_score: 0-100 judgement of how self-assured the delivery was.
+        clarity_score: 0-100 judgement of how clearly the answer was structured.
+        body_language_score: 0-100 from the camera; pass 0 if no camera is available.
+        content_score: 0-100 judgement of the substance and relevance of the answer.
+        star_score: 0-100 judgement of STAR structure.
+        feedback_summary: One or two sentences of plain coaching feedback.
+        strengths: What the candidate did well in this answer.
+        improvements: The single highest-value thing to change next time.
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
+
+    # Measure fillers from what the candidate actually said, not from a paraphrase.
+    filler_payload = analyze_pending_speech(session_id, question_number)
+    filler_word_count = filler_payload["total_filler_words"] if filler_payload else 0
+
+    overall = _clamp(
+        confidence_score * 0.20
+        + clarity_score * 0.20
+        + body_language_score * 0.15
+        + content_score * 0.25
+        + star_score * 0.20
+    )
+
+    feedback_bucket = _record_bucket(session_id, "feedback")
+    previous_score = feedback_bucket[-1]["overall"] if feedback_bucket else None
+    feedback_bucket.append(
+        {
+            "question_number": question_number,
+            "confidence": confidence_score,
+            "clarity": clarity_score,
+            "body_language": body_language_score,
+            "content": content_score,
+            "star_score": star_score,
+            "filler_word_count": filler_word_count,
+            "overall": overall,
+            "feedback": feedback_summary,
+            "strengths": strengths,
+            "improvements": improvements,
+            "timestamp": _utc_now(),
+        }
+    )
+
+    history = build_session_history(session_id)
+    milestones = _milestones_for(session_id)
+    scored = _scored_radar(session_id)
+    weakest_area = min(scored, key=lambda key: scored[key])
+
+    response = {
+        "status": "saved",
+        "question_number": question_number,
+        "overall_score": overall,
+        "confidence": confidence_score,
+        "clarity": clarity_score,
+        "body_language": body_language_score,
+        "content": content_score,
+        "star_score": star_score,
+        "filler_word_count": filler_word_count,
+        "trend": _trend_label(overall, previous_score),
+        "total_questions_answered": len(feedback_bucket),
+        "new_milestones": milestones,
+        "weakest_area": weakest_area,
+        "dashboard": build_session_dashboard(session_id),
+        "history_snapshot": {
+            "average_score": history["average_score"],
+            "latest_score": history["latest_score"],
+        },
+    }
+    _broadcast(session_id, "save_session_feedback", response)
     return response
 
 
+def detect_filler_words(tool_context: ToolContext, question_number: int) -> dict[str, Any]:
+    """Reports filler-word usage for the candidate's most recent answer.
+
+    The count is measured from the real speech transcript captured by the live audio
+    stream, so no transcript argument is needed or accepted.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
+
+    payload = analyze_pending_speech(session_id, question_number)
+    if payload is None:
+        return {
+            "question_number": question_number,
+            "status": "no_speech_captured",
+            "message": "No new candidate speech has been transcribed since the last analysis.",
+        }
+    return payload
+
+
 def analyze_body_language(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     eye_contact_rating: str,
     posture_rating: str,
@@ -651,7 +1134,24 @@ def analyze_body_language(
     facial_expression_details: str = "",
     notes: str = "",
 ) -> dict[str, Any]:
-    """Scores body language observations from the camera stream."""
+    """Records what you observed in the candidate's camera feed during their answer.
+
+    Only call this when a live camera frame is actually available.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        eye_contact_rating: "excellent", "good", or "poor".
+        posture_rating: "excellent", "good", or "poor".
+        expression_rating: "confident", "engaged", "neutral", or "nervous".
+        gesture_rating: "natural", "absent", or "excessive".
+        gesture_type: "open_hands", "pointing", "nodding", "fidgeting", or "none".
+        facial_expression_details: Short free-text note, e.g. "smiling while recalling".
+        notes: Any additional observation worth storing.
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     score_map = {"excellent": 95, "good": 78, "poor": 40}
     expression_map = {"confident": 92, "engaged": 86, "neutral": 72, "nervous": 45}
@@ -663,7 +1163,7 @@ def analyze_body_language(
     expression_score = expression_map.get(expression_rating, 68)
     gesture_score = gesture_map.get(gesture_rating, 68) + gesture_bonus.get(gesture_type, 0)
 
-    lowered_details = facial_expression_details.lower()
+    lowered_details = (facial_expression_details or "").lower()
     if "smiling" in lowered_details:
         expression_score += 8
     if "frowning" in lowered_details:
@@ -703,16 +1203,30 @@ def analyze_body_language(
 
 
 def analyze_voice_confidence(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     pace_rating: str,
     volume_rating: str,
     clarity_rating: str,
     pausing_rating: str,
     tone_rating: str = "neutral",
-    pause_duration_avg: float = 0.0,
 ) -> dict[str, Any]:
-    """Scores the candidate's vocal delivery."""
+    """Records your judgement of the candidate's vocal delivery.
+
+    Measured speech rate from the live transcript is blended in automatically.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        pace_rating: "good", "too_slow", or "too_fast".
+        volume_rating: "strong", "good", or "weak".
+        clarity_rating: "very_clear", "clear", or "mumbled".
+        pausing_rating: "strategic", "good", "none", or "excessive".
+        tone_rating: "enthusiastic", "confident", "neutral", "monotone", or "hesitant".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     pace_map = {"good": 90, "too_slow": 62, "too_fast": 55}
     volume_map = {"strong": 94, "good": 82, "weak": 45}
@@ -730,10 +1244,6 @@ def analyze_voice_confidence(
         )
         / 5
     )
-    if pause_duration_avg > 2.0:
-        overall = _clamp(overall - 10)
-    elif 0 < pause_duration_avg < 0.5:
-        overall = _clamp(overall - 5)
 
     tips = []
     if pace_rating == "too_fast":
@@ -757,7 +1267,6 @@ def analyze_voice_confidence(
             "clarity": clarity_rating,
             "pausing": pausing_rating,
             "tone": tone_rating,
-            "pause_avg": pause_duration_avg,
             "overall": overall,
             "timestamp": _utc_now(),
         }
@@ -779,7 +1288,7 @@ def analyze_voice_confidence(
 
 
 def evaluate_star_method(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     had_situation: bool,
     had_task: bool,
@@ -787,7 +1296,20 @@ def evaluate_star_method(
     had_result: bool,
     result_was_quantified: bool,
 ) -> dict[str, Any]:
-    """Evaluates whether the answer followed STAR."""
+    """Evaluates whether the candidate's answer followed the STAR structure.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        had_situation: True if they set the scene.
+        had_task: True if they stated their specific responsibility.
+        had_action: True if they described what they personally did.
+        had_result: True if they described the outcome.
+        result_was_quantified: True if the outcome included a concrete number or metric.
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     components = [had_situation, had_task, had_action, had_result]
     score = sum(25 for component in components if component)
@@ -824,14 +1346,16 @@ def evaluate_star_method(
         },
         "result_quantified": result_was_quantified,
         "missing_components": missing,
-        "coaching_note": "Strong STAR structure." if not missing else f"Missing: {', '.join(missing)}.",
+        "coaching_note": "Strong STAR structure."
+        if not missing
+        else f"Missing: {', '.join(missing)}.",
     }
     _broadcast(session_id, "evaluate_star_method", response)
     return response
 
 
 def cross_modal_analysis(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     voice_confidence_score: int,
     body_language_score: int,
@@ -840,7 +1364,21 @@ def cross_modal_analysis(
     facial_sync: str = "aligned",
     vocal_energy: str = "steady",
 ) -> dict[str, Any]:
-    """Fuses audio and visual coaching signals into a single presence score."""
+    """Fuses the audio and visual signals into a single presence score.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        voice_confidence_score: 0-100 vocal delivery score.
+        body_language_score: 0-100 non-verbal score.
+        content_score: 0-100 substance score.
+        engagement_score: 0-100 attentiveness score.
+        facial_sync: "aligned" or "mismatched" between expression and words.
+        vocal_energy: "energetic", "steady", or "flat".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     alignment_gap = abs(voice_confidence_score - body_language_score)
     alignment_bonus = 6 if alignment_gap <= 8 and facial_sync == "aligned" else 0
@@ -875,15 +1413,26 @@ def cross_modal_analysis(
 
 
 def emotion_recognition(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     vocal_tone: str,
     facial_expression: str,
     eye_contact_rating: str = "good",
     stress_markers: str = "",
-    speech_rate_wpm: int = 140,
 ) -> dict[str, Any]:
-    """Estimates confidence and stress from voice and face cues."""
+    """Estimates the candidate's confidence and stress from voice and face cues.
+
+    Args:
+        question_number: 1-based index of the question just answered.
+        vocal_tone: "confident", "enthusiastic", "neutral", "hesitant", or "anxious".
+        facial_expression: "calm", "engaged", "neutral", "tense", or "nervous".
+        eye_contact_rating: "excellent", "good", or "poor".
+        stress_markers: Comma-separated observations, e.g. "jaw_tension,rapid_blinking".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     tone_score = {"confident": 85, "enthusiastic": 88, "neutral": 70, "hesitant": 42, "anxious": 35}
     face_score = {"calm": 85, "engaged": 82, "neutral": 72, "tense": 45, "nervous": 38}
@@ -891,11 +1440,8 @@ def emotion_recognition(
 
     stress_penalty = 0
     if stress_markers:
-        stress_penalty += min(20, len([item for item in stress_markers.split(",") if item.strip()]) * 5)
-    if speech_rate_wpm > 175:
-        stress_penalty += 10
-    if speech_rate_wpm < 100:
-        stress_penalty += 5
+        marker_count = len([item for item in stress_markers.split(",") if item.strip()])
+        stress_penalty += min(20, marker_count * 5)
 
     confidence_signal = _clamp(
         tone_score.get(vocal_tone, 68) * 0.45
@@ -903,7 +1449,13 @@ def emotion_recognition(
         + eye_score.get(eye_contact_rating, 68) * 0.20
     )
     stress_score = _clamp(100 - confidence_signal + stress_penalty)
-    emotion_label = "confident" if confidence_signal >= 80 and stress_score <= 35 else "steady" if stress_score <= 50 else "stressed"
+    emotion_label = (
+        "confident"
+        if confidence_signal >= 80 and stress_score <= 35
+        else "steady"
+        if stress_score <= 50
+        else "stressed"
+    )
 
     response = {
         "question_number": question_number,
@@ -925,33 +1477,39 @@ def emotion_recognition(
 
 
 def engagement_tracking(
-    session_id: str,
+    tool_context: ToolContext,
     question_number: int,
     attention_score: int,
     distraction_count: int = 0,
-    response_latency_ms: int = 0,
     camera_available: bool = True,
     audio_energy: str = "steady",
 ) -> dict[str, Any]:
-    """Tracks attention and presence across the session."""
+    """Tracks the candidate's attention and presence across the session.
 
-    latency_penalty = 0
-    if response_latency_ms > 4500:
-        latency_penalty = 12
-    elif response_latency_ms > 2500:
-        latency_penalty = 6
+    Args:
+        question_number: 1-based index of the question just answered.
+        attention_score: 0-100 judgement of how present and focused they appeared.
+        distraction_count: Number of times they looked away or lost the thread.
+        camera_available: False when running audio-only.
+        audio_energy: "energetic", "steady", or "flat".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     distraction_penalty = min(20, distraction_count * 5)
     camera_penalty = 0 if camera_available else 6
     energy_bonus = 4 if audio_energy in {"steady", "energetic"} else -3
 
-    engagement_score = _clamp(attention_score - latency_penalty - distraction_penalty - camera_penalty + energy_bonus)
+    engagement_score = _clamp(
+        attention_score - distraction_penalty - camera_penalty + energy_bonus
+    )
     response = {
         "question_number": question_number,
         "engagement_score": engagement_score,
         "attention_score": attention_score,
         "distraction_count": distraction_count,
-        "response_latency_ms": response_latency_ms,
         "camera_available": camera_available,
         "audio_energy": audio_energy,
         "status": "recorded",
@@ -961,10 +1519,24 @@ def engagement_tracking(
     return response
 
 
-def adjust_difficulty_level(session_id: str, current_difficulty: str, performance_trend: str) -> dict[str, Any]:
-    """Adjusts question difficulty using recent performance and engagement."""
+def adjust_difficulty_level(tool_context: ToolContext, performance_trend: str) -> dict[str, Any]:
+    """Recommends whether to raise or lower question difficulty.
 
-    history = get_session_history(session_id)
+    The current difficulty is read from the session, and the new level is stored back so
+    subsequent calls to get_interview_question honour it.
+
+    Args:
+        performance_trend: "improving", "steady", or "declining".
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
+
+    context = _get_session_state(session_id)["context"]
+    current_difficulty = context.get("difficulty", "medium")
+
+    history = build_session_history(session_id)
     if history["total_questions"] < 2:
         return {
             "current_difficulty": current_difficulty,
@@ -977,7 +1549,7 @@ def adjust_difficulty_level(session_id: str, current_difficulty: str, performanc
     engagement_avg = history.get("engagement_summary", {}).get("average_engagement", 0)
     stress_avg = history.get("emotion_summary", {}).get("average_stress", 0)
 
-    if performance_trend == "improving" and avg_score >= 82 and engagement_avg >= 75 and stress_avg <= 45:
+    if performance_trend == "improving" and avg_score >= 82 and stress_avg <= 45:
         new_difficulty = "hard"
         reason = "Strong momentum and stable delivery. Increase the challenge."
     elif performance_trend == "declining" and (avg_score < 62 or stress_avg >= 60):
@@ -990,6 +1562,8 @@ def adjust_difficulty_level(session_id: str, current_difficulty: str, performanc
         new_difficulty = current_difficulty
         reason = "Keep monitoring one more turn before changing difficulty."
 
+    context["difficulty"] = new_difficulty
+
     learning_path = _learning_path(session_id)
     weakest_module = learning_path[0]["area"] if learning_path else "Balanced Practice"
     return {
@@ -998,57 +1572,27 @@ def adjust_difficulty_level(session_id: str, current_difficulty: str, performanc
         "reason": reason,
         "avg_score": avg_score,
         "latest_score": latest_score,
+        "engagement_average": engagement_avg,
         "recommended_focus": weakest_module,
     }
 
 
-def get_session_history(session_id: str) -> dict[str, Any]:
-    """Returns the aggregated session history."""
+def get_session_history(tool_context: ToolContext) -> dict[str, Any]:
+    """Returns everything recorded so far for this candidate's session."""
 
-    state = _get_session_state(session_id)
-    feedback = state["feedback"]
-    if not feedback:
-        return {
-            "total_questions": 0,
-            "scores": [],
-            "average_score": 0,
-            "message": "No history yet. Let's begin the interview!",
-        }
-
-    scores = [item["overall"] for item in feedback]
-    emotion_scores = [item["stress_score"] for item in state["emotion"]]
-    engagement_scores = [item["engagement_score"] for item in state["engagement"]]
-    total_fillers = sum(item["count"] for item in state["fillers"])
-
-    return {
-        "total_questions": len(feedback),
-        "scores": scores,
-        "average_score": _safe_mean(scores),
-        "best_score": max(scores),
-        "latest_score": scores[-1],
-        "improvement": scores[-1] - scores[0] if len(scores) > 1 else 0,
-        "total_filler_words": total_fillers,
-        "body_language_observations": len(state["body"]),
-        "voice_observations": len(state["voice"]),
-        "star_analyses": len(state["star"]),
-        "fusion_analyses": len(state["fusion"]),
-        "history": feedback,
-        "emotion_summary": {
-            "average_stress": _safe_mean(emotion_scores),
-            "latest_emotion": state["emotion"][-1]["emotion_label"] if state["emotion"] else "unknown",
-        },
-        "engagement_summary": {
-            "average_engagement": _safe_mean(engagement_scores),
-            "latest_engagement": engagement_scores[-1] if engagement_scores else 0,
-        },
-        "competency_radar": _competency_radar(session_id),
-        "heatmap": _heatmap(session_id),
-        "milestones": _milestones_for(session_id),
-    }
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
+    return build_session_history(session_id)
 
 
 def get_improvement_tips(weak_area: str) -> dict[str, Any]:
-    """Returns targeted coaching for a weak area."""
+    """Returns targeted drills for a specific competency.
+
+    Args:
+        weak_area: e.g. "star_method", "eye_contact", "filler_words", "pace",
+            "confidence", "content_quality", "engagement", "multimodal_presence".
+    """
 
     custom_tips = {
         "star_method": {
@@ -1085,6 +1629,28 @@ def get_improvement_tips(weak_area: str) -> dict[str, Any]:
                 "Repeat the answer with stronger posture and a more decisive final sentence.",
             ],
         },
+        "voice": {
+            "area": "Voice",
+            "tips": [
+                "Land the final word of each sentence instead of trailing off.",
+                "Vary your pitch on the numbers that matter most in your result.",
+            ],
+            "exercises": [
+                "Read one answer aloud at half speed, then at normal speed, and keep the slower ending.",
+                "Record two minutes and mark every sentence where your volume dropped.",
+            ],
+        },
+        "body_language": {
+            "area": "Body Language",
+            "tips": [
+                "Keep your hands visible and your shoulders square to the camera.",
+                "Look at the lens, not at your own video preview, when delivering your result.",
+            ],
+            "exercises": [
+                "Answer one question with a sticky note beside your webcam as an eye-line anchor.",
+                "Film thirty seconds and count how many times you touch your face.",
+            ],
+        },
     }
 
     if weak_area in custom_tips:
@@ -1093,135 +1659,114 @@ def get_improvement_tips(weak_area: str) -> dict[str, Any]:
         return IMPROVEMENT_TIPS[weak_area]
     return {
         "area": weak_area.replace("_", " ").title(),
-        "tips": [f"Practice one focused repetition on {weak_area.replace('_', ' ')} every day this week."],
+        "tips": [
+            f"Practice one focused repetition on {weak_area.replace('_', ' ')} every day this week."
+        ],
         "exercises": ["Do three timed mock answers and score yourself after each one."],
     }
 
 
 def fetch_grounding_data(topic: str) -> dict[str, Any]:
-    """Fetches grounded knowledge to reduce hallucinated advice."""
+    """Fetches verified interview coaching knowledge to avoid improvising advice.
+
+    Args:
+        topic: One of "star_method", "body_language_tips", "voice_delivery_tips",
+            "common_mistakes", or "company_interview_styles".
+    """
 
     if topic in GROUNDING_KNOWLEDGE:
         return GROUNDING_KNOWLEDGE[topic]
     return {
         "title": topic.replace("_", " ").title(),
         "info": "Focus on structured, observable interview behaviors and measurable outcomes.",
+        "available_topics": sorted(GROUNDING_KNOWLEDGE.keys()),
     }
 
 
 def save_session_recording(
-    session_id: str,
+    tool_context: ToolContext,
     recording_type: str = "audio",
     duration_seconds: int = 0,
     notes: str = "",
 ) -> dict[str, Any]:
-    """Stores session recording metadata."""
+    """Stores metadata about this practice session in the in-process session store.
+
+    No audio or video is persisted anywhere; only this metadata record is kept, and it is
+    discarded when the session ends.
+
+    Args:
+        recording_type: "audio" or "video".
+        duration_seconds: Length of the session so far.
+        notes: Any note worth attaching to the session record.
+    """
+
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
     timestamp = _utc_now()
     recording_id = f"{session_id}_{recording_type}_{timestamp.replace(':', '-')}"
-    metadata = {
-        "recording_id": recording_id,
-        "session_id": session_id,
-        "recording_type": recording_type,
-        "duration_seconds": duration_seconds,
-        "notes": notes,
-        "timestamp": timestamp,
-        "storage_path": "local_fallback",
-    }
-    _recordings.setdefault(session_id, []).append(metadata)
+    _recordings.setdefault(session_id, []).append(
+        {
+            "recording_id": recording_id,
+            "session_id": session_id,
+            "recording_type": recording_type,
+            "duration_seconds": duration_seconds,
+            "notes": notes,
+            "timestamp": timestamp,
+            "storage": "in_memory_only",
+        }
+    )
     return {
         "status": "saved",
         "recording_id": recording_id,
+        "storage": "in_memory_only",
         "total_recordings": len(_recordings.get(session_id, [])),
     }
 
 
-def generate_session_report(session_id: str) -> dict[str, Any]:
-    """Generates a summary report for the full practice session."""
+def generate_session_report(tool_context: ToolContext) -> dict[str, Any]:
+    """Generates the candidate's full end-of-interview coaching report."""
 
-    history = get_session_history(session_id)
-    if history.get("total_questions", 0) == 0:
-        return {
-            "report": "No questions were answered in this session.",
-            "recommendations": ["Answer at least three questions for a meaningful coaching report."],
-        }
+    session_id = _session_id_from_context(tool_context)
+    if not session_id:
+        return SESSION_UNAVAILABLE
 
-    context = _get_session_state(session_id)["context"]
-    average_score = history["average_score"]
-    radar = _competency_radar(session_id)
-    strongest_area = max(radar, key=radar.get)
-    weakest_area = min(radar, key=radar.get)
-    comparison = _previous_comparison(session_id, average_score)
-    filler_total = history["total_filler_words"]
-
-    performance_tier = (
-        "Excellent - Interview Ready"
-        if average_score >= 85
-        else "Good - Minor Refinements Needed"
-        if average_score >= 72
-        else "Developing - Focused Practice Recommended"
-        if average_score >= 55
-        else "Building Foundation - Keep Practicing"
-    )
-
-    report = {
-        "session_id": session_id,
-        "role": context.get("role", "general"),
-        "company_style": context.get("company_style", "general"),
-        "industry": context.get("industry", "general"),
-        "total_questions_answered": history["total_questions"],
-        "average_score": average_score,
-        "best_score": history["best_score"],
-        "score_improvement": history["improvement"],
-        "performance_tier": performance_tier,
-        "confidence": radar["confidence"],
-        "clarity": radar["clarity"],
-        "body_language": radar["body_language"],
-        "content": radar["content"],
-        "star_score": radar["star"],
-        "voice_score": radar["voice"],
-        "engagement_score": radar["engagement"],
-        "strongest_area": strongest_area.replace("_", " ").title(),
-        "weakest_area": weakest_area.replace("_", " ").title(),
-        "filler_word_summary": {
-            "total": filler_total,
-            "rating": "Excellent" if filler_total == 0 else "Good" if filler_total <= 5 else "Needs Work",
-        },
-        "heatmap": _heatmap(session_id),
-        "competency_radar": radar,
-        "milestones": _milestones_for(session_id),
-        "learning_path": _learning_path(session_id),
-        "study_plan": _study_plan(session_id),
-        "industry_specific_coaching": _industry_specific_coaching(session_id),
-        "comparison_to_previous_session": comparison,
-        "strengths": (
-            f"Your strongest area was {strongest_area.replace('_', ' ')}."
-            f" Keep leaning into that when answering tougher questions."
-        ),
-        "improvements": (
-            f"Your biggest gain opportunity is {weakest_area.replace('_', ' ')}."
-            " Focus on one tighter, more measurable answer structure next session."
-        ),
-        "recommendations": [
-            f"Prioritize {weakest_area.replace('_', ' ')} in the next practice block.",
-            f"Keep using {strongest_area.replace('_', ' ')} as a strength signal in interviews.",
-            f"Filler usage total: {filler_total}. Aim to reduce it by 30 percent next session.",
-            "Run one timed mock focused on concise, high-impact stories.",
-        ],
-    }
-
-    _get_session_state(session_id)["reports"].append(report)
-    _archived_reports.append(report)
+    report = build_session_report(session_id)
     _broadcast(session_id, "generate_session_report", report)
     return report
 
 
+AGENT_TOOLS = [
+    get_interview_question,
+    save_session_feedback,
+    detect_filler_words,
+    analyze_body_language,
+    analyze_voice_confidence,
+    evaluate_star_method,
+    cross_modal_analysis,
+    emotion_recognition,
+    engagement_tracking,
+    get_improvement_tips,
+    fetch_grounding_data,
+    adjust_difficulty_level,
+    get_session_history,
+    save_session_recording,
+    generate_session_report,
+]
+
 __all__ = [
-    "_recordings",
-    "_sessions",
+    "AGENT_TOOLS",
+    "SESSION_UNAVAILABLE",
     "adjust_difficulty_level",
     "analyze_body_language",
+    "analyze_pending_speech",
     "analyze_voice_confidence",
+    "build_session_dashboard",
+    "build_session_history",
+    "build_session_report",
+    "clear_session",
+    "count_filler_words",
     "cross_modal_analysis",
     "detect_filler_words",
     "emotion_recognition",
@@ -1229,10 +1774,13 @@ __all__ = [
     "evaluate_star_method",
     "fetch_grounding_data",
     "generate_session_report",
+    "get_full_transcript",
     "get_improvement_tips",
     "get_interview_question",
-    "get_session_dashboard",
     "get_session_history",
+    "record_candidate_speech",
     "save_session_feedback",
     "save_session_recording",
+    "seed_session_context",
+    "take_pending_transcript",
 ]

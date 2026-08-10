@@ -2,32 +2,58 @@
 
 from __future__ import annotations
 
+import logging
+
 from google.adk.agents import Agent
 from google.adk.tools import google_search
+from google.adk.tools.agent_tool import AgentTool
 
 try:
-    from ..runtime_config import get_default_agent_model
+    from ..runtime_config import (
+        get_default_agent_model,
+        get_search_model,
+        search_grounding_enabled,
+    )
 except ImportError:  # pragma: no cover - supports running from app/ directly
-    from runtime_config import get_default_agent_model
+    from runtime_config import (  # type: ignore
+        get_default_agent_model,
+        get_search_model,
+        search_grounding_enabled,
+    )
 
-from .prompts import AGENT_DESCRIPTION, COACH_ACE_INSTRUCTION
-from .tools import (
-    adjust_difficulty_level,
-    analyze_body_language,
-    analyze_voice_confidence,
-    cross_modal_analysis,
-    detect_filler_words,
-    emotion_recognition,
-    engagement_tracking,
-    evaluate_star_method,
-    fetch_grounding_data,
-    generate_session_report,
-    get_improvement_tips,
-    get_interview_question,
-    get_session_history,
-    save_session_feedback,
-    save_session_recording,
-)
+from .prompts import AGENT_DESCRIPTION, COACH_ACE_INSTRUCTION, SEARCH_AGENT_INSTRUCTION
+from .tools import AGENT_TOOLS
+
+logger = logging.getLogger(__name__)
+
+
+def _build_tools() -> list:
+    """Assembles the agent's toolset.
+
+    ADK only permits one built-in tool per agent, and it cannot be combined with custom
+    function tools on the same agent. ``google_search`` is therefore isolated in a
+    dedicated sub-agent and surfaced to Coach Ace through ``AgentTool``, which is the
+    supported way to mix a built-in tool with function tools.
+    """
+
+    tools = list(AGENT_TOOLS)
+
+    if not search_grounding_enabled():
+        logger.info("Search grounding disabled via ENABLE_SEARCH_GROUNDING.")
+        return tools
+
+    research_agent = Agent(
+        name="interview_research",
+        model=get_search_model(),
+        description=(
+            "Looks up current, verifiable facts about a company's interview process "
+            "using Google Search."
+        ),
+        instruction=SEARCH_AGENT_INSTRUCTION,
+        tools=[google_search],
+    )
+    tools.append(AgentTool(agent=research_agent))
+    return tools
 
 
 root_agent = Agent(
@@ -35,22 +61,5 @@ root_agent = Agent(
     model=get_default_agent_model(),
     description=AGENT_DESCRIPTION,
     instruction=COACH_ACE_INSTRUCTION,
-    tools=[
-        get_interview_question,
-        save_session_feedback,
-        detect_filler_words,
-        analyze_body_language,
-        analyze_voice_confidence,
-        evaluate_star_method,
-        cross_modal_analysis,
-        emotion_recognition,
-        engagement_tracking,
-        get_improvement_tips,
-        fetch_grounding_data,
-        adjust_difficulty_level,
-        get_session_history,
-        save_session_recording,
-        generate_session_report,
-        google_search,
-    ],
+    tools=_build_tools(),
 )

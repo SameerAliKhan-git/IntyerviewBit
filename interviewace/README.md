@@ -1,94 +1,63 @@
-# 🏆 InterviewAce: Multimodal AI Interview Coach
+# InterviewAce — application package
 
-**InterviewAce** is a real-time, interactive AI interview coach built entirely on the **Google Agent Development Kit (ADK)** and powered by the **Gemini Live API**. It listens to your voice, watches your body language via your webcam, and provides live coaching feedback using the STAR method. 
+Full project documentation lives in the [repository README](../README.md).
+Design details are in [ARCHITECTURE.md](ARCHITECTURE.md); operational and security
+guidance is in [SECURITY.md](../SECURITY.md).
 
-*This project was built over 48 hours for the Gemini Live Agent Challenge!*
+## Quick start
 
-## 🌟 Hackathon Requirements Fulfilled
--   **Mandatory AI:** Uses `gemini-2.5-flash-native-audio-preview` via Vertex AI.
--   **Frameworks:** Built exclusively using **Google ADK** (`LiveRequestQueue`, `runner.run_live()`, etc.).
--   **GCP Backbone:** Backend hosted on **Cloud Run**, grounding data via **Firestore**, models via **Vertex AI**.
--   **Category Features (Live Agents):** 
-    - Full bidirectional streaming.
-    - Automatic barge-in (interruption handling).
-    - Multimodal understanding (Voice + Camera/Vision).
--   **BONUS Points Nailed:**
-    -  ✅ **Automated deployment:** Included `deploy/deploy.sh` and `deploy/terraform/` scripts for complete IaC (`+0.2 pts`).
-    -  ✅ **Blog Post:** See our Medium article on building this (`+0.6 pts`).
-    -  ✅ **GDG Member:** Active Google Developer Group membership (`+0.2 pts`).
-
-## 🏗️ Architecture Stack
-
-![InterviewAce Architecture Flow](architecture.png)
-
-See the full data flow details in our [ARCHITECTURE.md](ARCHITECTURE.md).
-
-1.  **Frontend:** Glassmorphic pure JS/HTML/CSS dashboard. WebRTC captures raw 16kHz PCM audio + continuous base64 webcam frames and pushes them over WebSockets.
-2.  **Backend Controller:** FastAPI. Maps WebSocket payloads directly into ADK's `LiveRequestQueue`.
-3.  **ADK Core Engine:** The `interview_coach_agent` (Coach Ace). 
-    - Perceives both video frames (vision) and audio (voice).
-    - Outputs native audio speech (`response_modalities=["AUDIO"]`) through the Gemini Live API.
-    - Interacts with custom tools connected to **Firestore** and **Cloud Storage** to pull interview best practices (STAR method), save session history, and track long-term progress.
-
-## 🚀 Spin-Up Instructions (Local Development)
-
-### Prerequisites:
-- Python 3.10+
-- A Google Cloud Project with Billing Enabled.
-- Vertex AI API Enabled.
-- `gcloud` CLI installed and authenticated.
-
-### 1. Set Up Environment
 ```bash
-git clone <this-repo>
-cd interviewace
 python -m venv venv
-source venv/bin/activate  # Or `venv\Scripts\activate` on Windows
-
+source venv/bin/activate          # Windows: .\venv\Scripts\activate
 pip install -r requirements.txt
+
+cp .env.example .env              # add your GOOGLE_API_KEY
+
+uvicorn app.main:app --reload --port 8080
 ```
 
-### 2. Configure Credentials & API Keys
-You MUST supply a valid Gemini API key to use the live voice features.
+Open http://localhost:8080 and grant camera and microphone permission.
 
-1. Copy the example `.env` file: `cp .env.example .env`
-2. Open `.env` and add your key: `GEMINI_API_KEY="your_actual_key_here"`
-3. Make sure the model in `.env` is set to the Live API model:
-   ```env
-   AGENT_MODEL="gemini-2.5-flash-native-audio-preview"
-   ```
+Run from this directory using `app.main:app`. That is the canonical import path — starting
+from inside `app/` makes `app` resolve as a namespace package and can load modules twice
+with separate copies of session state.
 
-*(Optional)* If you set up Firestore, change `USE_FIRESTORE="true"`. Otherwise, it falls back to an in-memory database gracefully.
+## Tests
 
-### 3. Run the Backend
 ```bash
-# Start the FastAPI + ADK Application
-python app/main.py
-# Or run with uvicorn: uvicorn app.main:app --reload --port 8080
-```
-> The web UI will now be available at `http://localhost:8080/`. Grant camera and mic permissions to begin your interview!
-
-## 🖥️ Proof of Cloud Deployment (Hackathon Requirement)
-*For Judges:* Please see the `deploy/terraform` directory for the exact Google Cloud infrastructure used (Cloud Run, Firestore, Cloud Storage). To watch the deployment proof and live platform logs, see our submitted 4-minute demonstration video.
-
-## ☁️ Cloud Deployment Instructions (Automated)
-To deploy this project automatically to Google Cloud Run, we have provided an automated deployment script and Terraform configurations.
-
-### Option A: Bash Deploy Script
-```bash
-cd interviewace/deploy
-chmod +x deploy.sh
-
-# Edit the file to add your PROJECT_ID, then run:
-./deploy.sh
+pytest -q          # 38 tests; ADK is stubbed, so no API key is needed
+ruff check .
 ```
 
-### Option B: Terraform (IaC)
-```bash
-cd interviewace/deploy/terraform
-terraform init
-terraform apply -var="project_id=YOUR_PROJECT_ID"
-```
+The suite covers session isolation, filler-word measurement, memory bounds, input
+validation, token auth, rate limiting, and the WebSocket bridge. It does **not** exercise
+the real Gemini Live API — verify that manually against a live key before deploying.
 
-## 🧠 Why InterviewAce Will Win
-InterviewAce breaks the "text box paradigm." By continuously processing webcam frames (for body language scoring: eye contact, posture) alongside simultaneous audio processing (for speech pace, filler words, and content clarity), it delivers a profoundly immersive, high-utility product. It actively demonstrates how Gemini's multimodal capabilities, orchestrated gracefully through Google ADK, can solve real anxiety for job candidates universally.
+## Layout
+
+| Path | Role |
+|------|------|
+| `app/main.py` | FastAPI app, WebSocket bridge, session tokens, rate limits |
+| `app/runtime_config.py` | Model profiles, input allowlists, limits, secrets |
+| `app/ws_manager.py` | Strict session-to-socket routing for tool results |
+| `app/interview_coach_agent/agent.py` | ADK agent and the `google_search` sub-agent |
+| `app/interview_coach_agent/tools.py` | 15 coaching tools, all `ToolContext`-bound |
+| `app/interview_coach_agent/prompts.py` | Coach Ace persona and tool-use rules |
+| `app/interview_coach_agent/grounding_data.py` | Question bank and coaching knowledge base |
+| `app/static/` | Vanilla JS client |
+| `deploy/` | `deploy.sh` and Terraform for Cloud Run |
+
+## Deployment
+
+See [Deploy to Cloud Run](../README.md#️-deploy-to-cloud-run). Secrets are read from Secret
+Manager; do not pass `GOOGLE_API_KEY` with `--set-env-vars`.
+
+## Known limitations
+
+- **State is in-process.** Session analytics are held in memory with a one-hour idle TTL,
+  and an instance restart drops in-flight sessions. Cloud Run session affinity keeps
+  analytics reads on the owning instance.
+- **Scores are model judgements.** Only filler words, timings, and counts are measured;
+  confidence, clarity, content, STAR, body language, voice, and engagement are the model's
+  assessment applied through a fixed rubric.
+- **Live API behaviour is not covered by tests.** The suite stubs the ADK.

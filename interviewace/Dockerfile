@@ -1,34 +1,36 @@
 FROM python:3.11-slim
 
-# Install system dependencies
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /interviewace
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
+
+# Build tooling is only needed while installing wheels, so it is removed in the same
+# layer to keep it out of the final image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements first for better Docker layer caching
+# Requirements first, so dependency layers cache across source changes.
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge -y --auto-remove build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+COPY app ./app
 
-# Copy the entire app
-COPY . .
+# Run unprivileged.
+RUN useradd --create-home --uid 10001 interviewace \
+    && chown -R interviewace:interviewace /interviewace
+USER interviewace
 
-# Set working directory to where main.py lives
-# This ensures "from interview_coach_agent.agent import root_agent" works
-WORKDIR /interviewace/app
-
-# Expose the port Cloud Run uses
 ENV PORT=8080
 EXPOSE 8080
 
-# Run uvicorn directly from the app/ directory
-# "main:app" means main.py's FastAPI `app` object
-CMD ["uvicorn", "main:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8080", \
-     "--log-level", "info", \
-     "--ws-max-size", "16777216", \
-     "--timeout-keep-alive", "300"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+
+# app.main:app is the single canonical import path. Running from inside app/ would make
+# `app` resolve as a namespace package and risk importing modules twice with split state.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --log-level info --ws-max-size 16777216 --timeout-keep-alive 300 --proxy-headers --forwarded-allow-ips '*'"]

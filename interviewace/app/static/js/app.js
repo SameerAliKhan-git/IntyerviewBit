@@ -1,7 +1,16 @@
 /**
  * app.js
- * InterviewAce live meeting client with reconnect and analytics rendering.
+ * InterviewAce live meeting client.
+ *
+ * Session identity comes from the server (POST /api/session) as an id plus a signed
+ * token; the browser never chooses its own session id, and every analytics read presents
+ * that token. All model-derived text is escaped before it reaches the DOM.
  */
+
+const esc = window.escapeHtml;
+const score = window.toScore;
+
+const MAX_RECONNECT_ATTEMPTS = 6;
 
 class VolumeVisualizer {
     constructor(analyserNode, ringsId, equalizerId, tileId) {
@@ -17,22 +26,28 @@ class VolumeVisualizer {
         this.micIcon = this.tile ? this.tile.querySelector('.mic-icon') : null;
         this.isAnimating = false;
         this.smoothedVolume = 0;
+        this.frameId = null;
     }
 
     start() {
-        if (!this.isAnimating) {
-            this.isAnimating = true;
-            this.draw();
-        }
+        if (this.isAnimating) return;
+        this.isAnimating = true;
+        this.draw();
     }
 
     stop() {
         this.isAnimating = false;
-        this.rings.forEach(ring => {
+        if (this.frameId) {
+            cancelAnimationFrame(this.frameId);
+            this.frameId = null;
+        }
+        this.rings.forEach((ring) => {
             ring.style.transform = 'scale(1)';
             ring.style.opacity = '0';
         });
-        this.eqBars.forEach(bar => { bar.style.height = '4px'; });
+        this.eqBars.forEach((bar) => {
+            bar.style.height = '4px';
+        });
         if (this.tile) this.tile.classList.remove('tile-speaking');
         if (this.eqContainer) this.eqContainer.style.display = 'none';
         if (this.micIcon) this.micIcon.style.display = 'inline-block';
@@ -40,7 +55,7 @@ class VolumeVisualizer {
 
     draw() {
         if (!this.isAnimating) return;
-        requestAnimationFrame(() => this.draw());
+        this.frameId = requestAnimationFrame(() => this.draw());
 
         this.analyser.getByteFrequencyData(this.dataArray);
         let sum = 0;
@@ -48,13 +63,11 @@ class VolumeVisualizer {
             sum += this.dataArray[i];
         }
 
-        const volume = (sum / this.bufferLength) / 128.0;
+        const volume = sum / this.bufferLength / 128.0;
         this.smoothedVolume = this.smoothedVolume * 0.7 + volume * 0.3;
         const isSpeaking = this.smoothedVolume > 0.05;
 
-        if (this.tile) {
-            this.tile.classList.toggle('tile-speaking', isSpeaking);
-        }
+        if (this.tile) this.tile.classList.toggle('tile-speaking', isSpeaking);
 
         if (isSpeaking && this.eqContainer) {
             this.eqContainer.style.display = 'flex';
@@ -83,10 +96,10 @@ class VolumeVisualizer {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const userId = `user_${Math.random().toString(36).slice(2, 9)}`;
-    const sessionId = `session_${Math.random().toString(36).slice(2, 11)}`;
     const dashboard = new window.Dashboard();
 
+    let sessionId = null;
+    let sessionToken = null;
     let ws = null;
     let reconnectTimeout = null;
     let heartbeatInterval = null;
@@ -95,10 +108,13 @@ document.addEventListener('DOMContentLoaded', () => {
     let isActive = false;
     let sessionStartTime = null;
     let ccTimeout = null;
+    let transcribeTimeout = null;
     let ccEnabled = true;
-    let hasSentIntroPrompt = false;
     let audioStarted = false;
-    let dialogueHistory = [];
+    let reportShown = false;
+    const dialogueHistory = [];
+    let candidateUtterance = '';
+    let agentUtterance = '';
     let finalReport = {};
 
     const camera = new window.CameraManager();
@@ -129,6 +145,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const companyBadge = document.getElementById('companyBadge');
     const meetingCode = document.getElementById('meetingCode');
     const feedbackPanel = document.getElementById('feedbackPanel');
+    const videoOverlay = document.getElementById('videoOverlay');
 
     let selectedRole = 'general';
     let selectedCompany = 'general';
@@ -138,13 +155,26 @@ document.addEventListener('DOMContentLoaded', () => {
     dashboard.setConnectionStatus('idle', 'Waiting');
     dashboard.setNetworkStatus('Network: Ready');
 
-    window.toggleSidebar = function toggleSidebar() {
-        sidebar.classList.toggle('hidden');
-    };
+    function showToast(message, duration = 2600) {
+        const container = document.getElementById('toastContainer');
+        if (!container) return;
+        const toast = document.createElement('div');
+        toast.className = 'toast';
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.remove(), duration);
+    }
 
-    window.closeAllSidebars = function closeAllSidebars() {
-        document.querySelectorAll('.right-sidebar').forEach(panel => panel.classList.remove('open'));
-    };
+    // Exposed because other modules and delegated handlers call it.
+    window.showToast = showToast;
+
+    function toggleAnalyticsSidebar() {
+        sidebar.classList.toggle('hidden');
+    }
+
+    function closeAllSidebars() {
+        document.querySelectorAll('.right-sidebar').forEach((panel) => panel.classList.remove('open'));
+    }
 
     setInterval(() => {
         if (!clockTime) return;
@@ -155,21 +185,32 @@ document.addEventListener('DOMContentLoaded', () => {
             clockTime.textContent = `${minutes}:${seconds}`;
             return;
         }
-        clockTime.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        clockTime.textContent = new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+        });
     }, 1000);
 
     bindSidebars();
     bindControls();
+    bindDialogActions();
     observeNetwork();
 
     setupJoinBtn.addEventListener('click', async () => {
+        setupJoinBtn.disabled = true;
         selectedRole = document.getElementById('roleSelect').value;
         selectedCompany = document.getElementById('companySelect').value;
         selectedDifficulty = document.getElementById('difficultySelect').value;
         selectedVoice = document.getElementById('voiceSelect').value;
 
         try {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const ticket = await requestSessionTicket();
+            sessionId = ticket.session_id;
+            sessionToken = ticket.token;
+
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 16000,
+            });
             if (audioContext.state === 'suspended') await audioContext.resume();
 
             audioPlayer = new window.AudioPlayer(audioContext);
@@ -177,21 +218,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const cameraReady = await camera.start();
             if (cameraReady) {
-                document.getElementById('videoOverlay').style.display = 'none';
+                videoOverlay.style.display = 'none';
                 cameraBtn.classList.remove('disabled-state');
                 cameraBtn.innerHTML = '<span class="material-icons">videocam</span>';
-                camera.startFrameExtraction(frame => {
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        sendJson({ type: 'image', mimeType: 'image/jpeg', data: frame });
-                    }
+                camera.startFrameExtraction((frame) => {
+                    sendJson({ type: 'image', mimeType: 'image/jpeg', data: frame });
                 });
             } else {
                 showToast('Camera unavailable. Continuing in audio-only mode.');
                 dashboard.setConnectionStatus('warning', 'Audio Only');
             }
 
-            agentVisualizer = new VolumeVisualizer(audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
-            userVisualizer = new VolumeVisualizer(audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
+            agentVisualizer = new VolumeVisualizer(
+                audioPlayer.getAnalyser(), 'agentRings', 'agentEqualizer', 'agentTile');
+            userVisualizer = new VolumeVisualizer(
+                audioRecorder.getAnalyser(), 'userRings', 'userEqualizer', 'userTile');
             agentVisualizer.start();
             userVisualizer.start();
 
@@ -200,17 +241,31 @@ document.addEventListener('DOMContentLoaded', () => {
             bottomBar.style.display = 'flex';
             sidebar.classList.remove('hidden');
 
-            companyBadge.textContent = selectedCompany === 'general'
-                ? 'General'
-                : selectedCompany.charAt(0).toUpperCase() + selectedCompany.slice(1);
+            companyBadge.textContent =
+                selectedCompany === 'general'
+                    ? 'General'
+                    : selectedCompany.charAt(0).toUpperCase() + selectedCompany.slice(1);
             meetingCode.textContent = `${selectedCompany}-${selectedDifficulty}-interview`;
 
             connectWebSocket();
         } catch (error) {
             console.error('Initialization error:', error);
-            showToast(`Initialization error: ${error.message}`);
+            showToast(`Could not start the interview: ${error.message}`, 6000);
+            setupJoinBtn.disabled = false;
         }
     });
+
+    async function requestSessionTicket() {
+        const response = await fetch('/api/session', { method: 'POST' });
+        if (response.status === 429) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.detail || 'Rate limited. Please try again shortly.');
+        }
+        if (!response.ok) {
+            throw new Error(`Server refused the session (HTTP ${response.status})`);
+        }
+        return response.json();
+    }
 
     function bindSidebars() {
         const chatSidebar = document.getElementById('chatSidebar');
@@ -221,10 +276,20 @@ document.addEventListener('DOMContentLoaded', () => {
         const chatSendBtn = document.getElementById('chatSendBtn');
         const chatList = document.getElementById('chatList');
 
-        document.querySelectorAll('.interaction-btn').forEach(button => {
+        document.querySelectorAll('.sidebar-close, .close-sidebar-btn').forEach((button) => {
+            button.addEventListener('click', () => {
+                if (button.classList.contains('sidebar-close')) {
+                    toggleAnalyticsSidebar();
+                    return;
+                }
+                closeAllSidebars();
+            });
+        });
+
+        document.querySelectorAll('.interaction-btn').forEach((button) => {
             button.addEventListener('click', () => {
                 const action = button.getAttribute('data-action');
-                window.closeAllSidebars();
+                closeAllSidebars();
 
                 if (action === 'Chat') {
                     chatSidebar.classList.add('open');
@@ -235,20 +300,18 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
                 if (action === 'Meeting details') {
-                    detailParams.innerHTML = `Role: <b style="color:#1a73e8">${selectedRole}</b><br>Company: <b style="color:#1a73e8">${selectedCompany}</b><br>Diff: <b style="color:#1a73e8">${selectedDifficulty}</b>`;
+                    detailParams.textContent =
+                        `Role: ${selectedRole} · Company: ${selectedCompany} · Difficulty: ${selectedDifficulty}`;
                     detailsSidebar.classList.add('open');
                     return;
                 }
                 if (action === 'Live Analysis') {
-                    const sidebar = document.getElementById('analyticsSidebar');
-                    if (sidebar) {
-                        sidebar.classList.toggle('hidden');
-                        button.classList.toggle('active', !sidebar.classList.contains('hidden'));
-                    }
+                    toggleAnalyticsSidebar();
+                    button.classList.toggle('active', !sidebar.classList.contains('hidden'));
                     return;
                 }
                 if (action) {
-                    showToast(`"${action}" is unavailable early in the call.`);
+                    showToast(`"${action}" is not available in this mock interview.`);
                 }
             });
         });
@@ -257,7 +320,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chatInput.addEventListener('input', () => {
             chatSendBtn.disabled = chatInput.value.trim() === '';
         });
-        chatInput.addEventListener('keypress', event => {
+        chatInput.addEventListener('keypress', (event) => {
             if (event.key === 'Enter') chatSendBtn.click();
         });
         chatSendBtn.addEventListener('click', () => {
@@ -267,10 +330,22 @@ document.addEventListener('DOMContentLoaded', () => {
             const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const node = document.createElement('div');
             node.className = 'chat-msg me';
-            node.innerHTML = `<div class="chat-name">You<span class="chat-time">${time}</span></div>${text}`;
+
+            // Built as nodes rather than an HTML string: this is raw user input.
+            const nameRow = document.createElement('div');
+            nameRow.className = 'chat-name';
+            nameRow.textContent = 'You';
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'chat-time';
+            timeSpan.textContent = time;
+            nameRow.appendChild(timeSpan);
+            node.appendChild(nameRow);
+            node.appendChild(document.createTextNode(text));
+
             chatList.appendChild(node);
             chatList.scrollTop = chatList.scrollHeight;
 
+            dialogueHistory.push(`[You - chat]: ${text}`);
             sendJson({ type: 'text', text: `(In chat) Candidate says: ${text}` });
             chatInput.value = '';
             chatSendBtn.disabled = true;
@@ -280,18 +355,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function bindControls() {
         endBtn.addEventListener('click', () => {
             if (!isActive) return;
-            manualClose = true;
-            sendJson({
-                type: 'text',
-                text: "I'd like to end the interview now. Please generate the session report.",
-            });
-            thinkingOverlay.style.display = 'block';
-            setTimeout(() => {
-                if (!finalReport.average_score) {
-                    cleanup();
-                    showFeedbackPanel();
-                }
-            }, 7000);
+            endBtn.disabled = true;
+            endInterview('ended_by_candidate');
         });
 
         micBtn.addEventListener('click', () => {
@@ -299,6 +364,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const isUnmuted = audioRecorder.toggleMute();
             micBtn.classList.toggle('disabled-state', !isUnmuted);
             micBtn.innerHTML = `<span class="material-icons">${isUnmuted ? 'mic' : 'mic_off'}</span>`;
+            micBtn.setAttribute('aria-pressed', String(!isUnmuted));
             userMicIcon.textContent = isUnmuted ? 'mic' : 'mic_off';
             showToast(isUnmuted ? 'Microphone on' : 'Microphone muted');
         });
@@ -307,27 +373,48 @@ document.addEventListener('DOMContentLoaded', () => {
             const enabled = camera.toggle();
             cameraBtn.classList.toggle('disabled-state', !enabled);
             cameraBtn.innerHTML = `<span class="material-icons">${enabled ? 'videocam' : 'videocam_off'}</span>`;
-            document.getElementById('videoOverlay').style.display = enabled ? 'none' : 'flex';
-            showToast(enabled ? 'Camera on' : 'Camera off');
+            cameraBtn.setAttribute('aria-pressed', String(!enabled));
+            videoOverlay.style.display = enabled ? 'none' : 'flex';
+            showToast(enabled ? 'Camera on' : 'Camera off — no video is being sent');
         });
 
         ccBtn.addEventListener('click', () => {
             ccEnabled = !ccEnabled;
             ccBtn.classList.toggle('active', ccEnabled);
+            ccBtn.setAttribute('aria-pressed', String(ccEnabled));
             if (!ccEnabled) ccContainer.style.display = 'none';
             showToast(ccEnabled ? 'Captions on' : 'Captions off');
         });
     }
 
+    function bindDialogActions() {
+        const newSessionBtn = document.getElementById('newSessionBtn');
+        if (newSessionBtn) {
+            newSessionBtn.addEventListener('click', () => window.location.reload());
+        }
+        const copyBtn = document.getElementById('copyJoinInfoBtn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', async () => {
+                try {
+                    await navigator.clipboard.writeText(window.location.origin);
+                    showToast('Meeting link copied');
+                } catch (error) {
+                    showToast('Could not copy the link');
+                }
+            });
+        }
+    }
+
     function observeNetwork() {
-        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        const connection =
+            navigator.connection || navigator.mozConnection || navigator.webkitConnection;
         const update = () => {
             if (!connection) {
                 dashboard.setNetworkStatus('Network: Standard');
                 return;
             }
-            const label = `Network: ${(connection.effectiveType || 'stable').toUpperCase()}`;
-            dashboard.setNetworkStatus(label);
+            dashboard.setNetworkStatus(
+                `Network: ${(connection.effectiveType || 'stable').toUpperCase()}`);
         };
         update();
         if (connection && connection.addEventListener) {
@@ -337,16 +424,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function connectWebSocket() {
         clearTimeout(reconnectTimeout);
-        dashboard.setConnectionStatus('connecting', reconnectAttempts > 0 ? 'Reconnecting' : 'Connecting');
+        dashboard.setConnectionStatus(
+            'connecting', reconnectAttempts > 0 ? 'Reconnecting' : 'Connecting');
 
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const params = new URLSearchParams({
+            token: sessionToken,
             voice: selectedVoice,
             role: selectedRole,
             company: selectedCompany,
             difficulty: selectedDifficulty,
         });
-        ws = new WebSocket(`${protocol}//${location.host}/ws/${userId}/${sessionId}?${params}`);
+        ws = new WebSocket(`${protocol}//${location.host}/ws/${encodeURIComponent(sessionId)}?${params}`);
 
         ws.onopen = async () => {
             reconnectAttempts = 0;
@@ -361,7 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!audioStarted && audioRecorder) {
                 try {
-                    await audioRecorder.start(buffer => {
+                    await audioRecorder.start((buffer) => {
                         if (ws && ws.readyState === WebSocket.OPEN) ws.send(buffer);
                     });
                     audioStarted = true;
@@ -370,21 +459,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     userMicIcon.textContent = 'mic';
                 } catch (error) {
                     console.error('Microphone error:', error);
-                    showToast('Microphone unavailable. Text prompts still work.');
+                    showToast('Microphone unavailable. You can still use the chat panel.', 5000);
                 }
-            }
-
-            // The server sends the intro prompt after the Live API connects.
-            // We just show a waiting state here.
-            if (!hasSentIntroPrompt) {
-                hasSentIntroPrompt = true;
-                showToast('Connecting to AI interviewer...');
-            } else {
-                showToast('Connection restored. Resuming session.');
             }
         };
 
-        ws.onmessage = event => {
+        ws.onmessage = (event) => {
             if (typeof event.data !== 'string') return;
             try {
                 handleAdkEvent(JSON.parse(event.data));
@@ -396,25 +476,29 @@ document.addEventListener('DOMContentLoaded', () => {
         ws.onclose = (event) => {
             stopHeartbeat();
             isActive = false;
-            if (!manualClose) {
-                console.warn('WebSocket closed unexpectedly:', event.code, event.reason);
-                scheduleReconnect();
-            } else {
+            if (manualClose) {
                 dashboard.setConnectionStatus('idle', 'Session Ended');
+                return;
             }
+            if (event.code === 1008) {
+                // Token rejected; reconnecting cannot help.
+                dashboard.setConnectionStatus('warning', 'Session expired');
+                showToast('Your session expired. Start a new interview.', 6000);
+                manualClose = true;
+                return;
+            }
+            console.warn('WebSocket closed unexpectedly:', event.code, event.reason);
+            scheduleReconnect();
         };
 
-        ws.onerror = error => {
-            console.warn('WebSocket transport error (will auto-reconnect):', error);
+        ws.onerror = () => {
             dashboard.setConnectionStatus('warning', 'Connection Issue');
         };
     }
 
     function startHeartbeat() {
         stopHeartbeat();
-        heartbeatInterval = setInterval(() => {
-            sendJson({ type: 'ping' });
-        }, 15000);
+        heartbeatInterval = setInterval(() => sendJson({ type: 'ping' }), 15000);
     }
 
     function stopHeartbeat() {
@@ -423,37 +507,40 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function scheduleReconnect() {
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            dashboard.setConnectionStatus('warning', 'Disconnected');
+            showToast('Could not reconnect. Your report is still available below.', 6000);
+            endInterview('connection_lost');
+            return;
+        }
+
         reconnectAttempts += 1;
-        const delay = Math.min(10000, 1200 * reconnectAttempts);
+        // Exponential backoff with jitter, so a server restart does not get a thundering
+        // herd of clients retrying in lockstep.
+        const base = Math.min(10000, 1000 * 2 ** (reconnectAttempts - 1));
+        const delay = Math.round(base * (0.7 + Math.random() * 0.6));
         dashboard.setConnectionStatus('warning', `Reconnecting ${reconnectAttempts}`);
         showToast(`Connection dropped. Reconnecting in ${Math.round(delay / 1000)}s...`);
         reconnectTimeout = setTimeout(connectWebSocket, delay);
     }
 
     function handleAdkEvent(event) {
-        if (event.type === 'pong') {
-            return;
-        }
+        if (event.type === 'pong') return;
 
         if (event.type === 'live_ready') {
             dashboard.setConnectionStatus('live', 'Live');
-            showToast('AI Interviewer connected. Interview starting...');
+            showToast('Connected. Coach Ace is joining...');
+            return;
+        }
+
+        if (event.type === 'session_expired') {
+            showToast('Session time limit reached. Generating your report...', 5000);
+            endInterview('time_limit');
             return;
         }
 
         if (event.type === 'server_error') {
-            const errStr = String(event.error || 'Unknown error');
-            console.warn('Server error event:', errStr);
-            // Only show toast for non-spammy errors
-            if (errStr.includes('1007') || errStr.includes('1008') || errStr.includes('invalid argument')) {
-                showToast('AI connection interrupted. Reconnecting...', 3000);
-                // Don't set manualClose — let it auto-reconnect
-            } else if (errStr.includes('403') || errStr.includes('400') || errStr.includes('API key')) {
-                showToast(`Fatal Error: ${errStr}`, 8000);
-                manualClose = true;
-            } else {
-                showToast(`Server Error: ${errStr.substring(0, 80)}`, 4000);
-            }
+            handleServerError(event);
             return;
         }
 
@@ -467,8 +554,12 @@ document.addEventListener('DOMContentLoaded', () => {
             agentMicIcon.classList.remove('red-icon');
 
             for (const part of event.content.parts) {
-                if (part.text) {
-                    dialogueHistory.push(`[Coach Ace]: ${part.text}`);
+                // part.text on a native-audio model is usually the model's private
+                // reasoning, not speech. Recording it would put Coach Ace's internal
+                // monologue into the candidate's transcript; the words actually spoken
+                // arrive via outputTranscription instead.
+                if (part.text && part.thought) {
+                    console.debug('thought part suppressed');
                 }
 
                 const inlineData = part.inlineData || part.inline_data;
@@ -478,42 +569,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const functionResponse = part.functionResponse || part.function_response;
                 if (functionResponse) {
-                    if (functionResponse.response && functionResponse.response.result && typeof functionResponse.response.result === 'string') {
-                        functionResponse.response = JSON.parse(functionResponse.response.result);
-                    }
                     processToolResult(functionResponse);
                 }
             }
         }
 
+        // Transcription arrives in fragments. They are accumulated per speaker and
+        // committed as one line per utterance, otherwise the downloaded transcript is
+        // shredded into dozens of partial words.
         const inputTranscript = event.inputTranscription || event.input_transcription;
-        if (inputTranscript && inputTranscript.text && inputTranscript.text.trim()) {
-            const text = inputTranscript.text.trim();
-            dialogueHistory.push(`[You]: ${text}`);
+        if (inputTranscript && inputTranscript.text) {
+            flushUtterance('agent');
+            candidateUtterance += inputTranscript.text;
             thinkingOverlay.style.display = 'block';
-            showCaptions('You', 'Y', 'bg-green', text);
+            showCaptions('You', 'Y', 'bg-green', candidateUtterance.trim());
             pulseTranscription();
         }
 
         const outputTranscript = event.outputTranscription || event.output_transcription;
-        if (outputTranscript && outputTranscript.text && outputTranscript.text.trim()) {
-            showCaptions('Coach Ace', 'C', 'bg-blue', outputTranscript.text.trim());
+        if (outputTranscript && outputTranscript.text) {
+            flushUtterance('candidate');
+            agentUtterance += outputTranscript.text;
+            showCaptions('Coach Ace', 'C', 'bg-blue', agentUtterance.trim());
             pulseTranscription();
         }
 
+        if (event.interrupted && audioPlayer) {
+            // Cut the agent off the moment the candidate starts talking.
+            audioPlayer.stop();
+        }
+
         if (event.turnComplete || event.turn_complete || event.interrupted) {
+            flushUtterance('all');
             agentMicIcon.textContent = 'mic_off';
             agentMicIcon.classList.add('red-icon');
             thinkingOverlay.style.display = 'none';
-            if (event.interrupted && audioPlayer) audioPlayer.stop();
         }
+    }
+
+    function handleServerError(event) {
+        const category = event.category || 'transient';
+        const message = event.message || 'The connection to the AI was interrupted.';
+        console.warn('Server error event:', category, event.error);
+
+        // Quota exhaustion and auth failures cannot be retried away. Reconnecting into
+        // them produces a loop of identical failures, so end cleanly and show the
+        // candidate the scores captured up to this point.
+        if (category === 'quota' || category === 'auth') {
+            showToast(message, 9000);
+            manualClose = true;
+            dashboard.setConnectionStatus('warning', category === 'quota' ? 'Quota reached' : 'Unavailable');
+            endInterview(category);
+            return;
+        }
+
+        showToast(message, 3000);
     }
 
     function processToolResult(result) {
         if (!result || !result.response) return;
-        const data = typeof result.response === 'string' ? JSON.parse(result.response) : result.response;
-        const name = result.name;
 
+        let data = result.response;
+        if (typeof data === 'string') {
+            try {
+                data = JSON.parse(data);
+            } catch (error) {
+                return;
+            }
+        }
+        // ADK wraps plain-dict tool returns as {result: "<json string>"}.
+        if (data && typeof data.result === 'string') {
+            try {
+                data = JSON.parse(data.result);
+            } catch (error) {
+                return;
+            }
+        }
+        if (!data || typeof data !== 'object') return;
+
+        const name = result.name;
         dashboard.handleToolResult(name, data);
 
         if (name === 'analyze_body_language') {
@@ -532,11 +666,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (name === 'generate_session_report') {
             finalReport = { ...finalReport, ...data };
-            dashboard.storeSessionSummary(finalReport);
-            cleanup();
-            if (manualClose && feedbackPanel.style.display !== 'flex') {
-                showFeedbackPanel();
-            }
         }
     }
 
@@ -546,10 +675,62 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    /**
+     * Ends the interview deterministically.
+     *
+     * The report is fetched from the server rather than waiting for the model to decide
+     * to call a tool, so the modal can never open with an empty scorecard.
+     */
+    async function endInterview(reason) {
+        if (reportShown) return;
+        reportShown = true;
+        manualClose = true;
+        thinkingOverlay.style.display = 'block';
+        // Commit whatever was mid-utterance so it appears in the transcript.
+        flushUtterance('all');
+
+        if (reason === 'ended_by_candidate') {
+            sendJson({
+                type: 'text',
+                text: "I'd like to end the interview now. Please give me a short closing summary.",
+            });
+        }
+
+        try {
+            const response = await fetch(
+                `/api/sessions/${encodeURIComponent(sessionId)}/report?token=${encodeURIComponent(sessionToken)}`,
+                { method: 'POST' },
+            );
+            if (response.ok) {
+                finalReport = { ...finalReport, ...(await response.json()) };
+            } else {
+                console.warn('Report request failed:', response.status);
+            }
+        } catch (error) {
+            console.warn('Report request failed:', error);
+        }
+
+        dashboard.handleToolResult('generate_session_report', finalReport);
+        cleanup();
+        showFeedbackPanel();
+    }
+
+    /** Commits any buffered speech to the transcript. */
+    function flushUtterance(who) {
+        if ((who === 'candidate' || who === 'all') && candidateUtterance.trim()) {
+            dialogueHistory.push(`[You]: ${candidateUtterance.trim()}`);
+            candidateUtterance = '';
+        }
+        if ((who === 'agent' || who === 'all') && agentUtterance.trim()) {
+            dialogueHistory.push(`[Coach Ace]: ${agentUtterance.trim()}`);
+            agentUtterance = '';
+        }
+    }
+
     function pulseTranscription() {
         transcribingBadge.style.display = 'flex';
-        clearTimeout(ccTimeout);
-        ccTimeout = setTimeout(() => {
+        clearTimeout(transcribeTimeout);
+        transcribeTimeout = setTimeout(() => {
             transcribingBadge.style.display = 'none';
         }, 3000);
     }
@@ -571,9 +752,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!rating) return;
         const dot = document.getElementById(dotId);
         const label = document.getElementById(labelId);
-        if (label) label.textContent = rating;
+        if (label) label.textContent = String(rating);
         if (dot) {
-            dot.className = `bi-dot ${['excellent', 'good', 'confident', 'engaged', 'natural'].includes(rating) ? 'good' : 'bad'}`;
+            const positive = ['excellent', 'good', 'confident', 'engaged', 'natural'].includes(rating);
+            dot.className = `bi-dot ${positive ? 'good' : 'bad'}`;
         }
     }
 
@@ -581,35 +763,40 @@ document.addEventListener('DOMContentLoaded', () => {
         const element = document.getElementById(id);
         if (!element) return;
         const badge = element.querySelector('.si-badge');
-        if (badge) {
-            badge.className = `si-badge ${isPresent ? 'on' : 'off'}`;
-        }
+        if (badge) badge.className = `si-badge ${isPresent ? 'on' : 'off'}`;
     }
 
     function showFeedbackPanel() {
         feedbackPanel.style.display = 'flex';
 
-        const overall = finalReport.average_score || finalReport.overall_score || 0;
-        const conf = finalReport.confidence || 0;
-        const clar = finalReport.clarity || 0;
-        const cont = finalReport.content || 0;
-        const star = finalReport.star_score || 0;
-        const body = finalReport.body_language || 0;
+        const overall = score(finalReport.average_score || finalReport.overall_score);
+        const conf = score(finalReport.confidence);
+        const clar = score(finalReport.clarity);
+        const cont = score(finalReport.content);
+        const star = score(finalReport.star_score);
+        const body = score(finalReport.body_language);
 
-        document.getElementById('scoreOverall').textContent = overall;
-        document.getElementById('scoreConfidence').textContent = conf;
-        document.getElementById('scoreClarity').textContent = clar;
-        document.getElementById('scoreContent').textContent = cont;
-        document.getElementById('scoreStar').textContent = star;
-        document.getElementById('scoreBody').textContent = body;
+        document.getElementById('scoreOverall').textContent = String(overall);
+        document.getElementById('scoreConfidence').textContent = String(conf);
+        document.getElementById('scoreClarity').textContent = String(clar);
+        document.getElementById('scoreContent').textContent = String(cont);
+        document.getElementById('scoreStar').textContent = String(star);
+        document.getElementById('scoreBody').textContent = String(body);
 
         const tierBadge = document.getElementById('tierBadge');
-        tierBadge.innerHTML = `<span class="tier-pill">${finalReport.performance_tier || 'Session complete'}</span>`;
+        tierBadge.innerHTML =
+            `<span class="tier-pill">${esc(finalReport.performance_tier || 'Session complete')}</span>`;
 
-        // Build rich feedback content with visualizations
         const sections = [];
 
-        // --- 1. Bar Chart: Score Breakdown ---
+        if (!finalReport.total_questions_answered) {
+            sections.push(`
+                <div class="fb-section">
+                    <p>No answers were scored in this session, so there is nothing to chart yet.
+                    Try a session with at least three answers for a full breakdown.</p>
+                </div>`);
+        }
+
         const scores = [
             { label: 'Confidence', value: conf, color: '#4285f4' },
             { label: 'Clarity', value: clar, color: '#34a853' },
@@ -617,52 +804,58 @@ document.addEventListener('DOMContentLoaded', () => {
             { label: 'STAR', value: star, color: '#fbbc05' },
             { label: 'Body Lang.', value: body, color: '#a142f4' },
         ];
-        const barChartHTML = `
-            <div class="fb-section">
-                <div class="fb-section-title"><span class="material-icons">bar_chart</span> Score Breakdown</div>
-                <div class="fb-bar-chart">
-                    ${scores.map(s => `
-                        <div class="fb-bar-row">
-                            <span class="fb-bar-label">${s.label}</span>
-                            <div class="fb-bar-track">
-                                <div class="fb-bar-fill" style="width:${s.value}%;background:${s.color}"></div>
+        if (scores.some((item) => item.value > 0)) {
+            sections.push(`
+                <div class="fb-section">
+                    <div class="fb-section-title"><span class="material-icons">bar_chart</span> Score Breakdown</div>
+                    <div class="fb-bar-chart">
+                        ${scores.map((item) => `
+                            <div class="fb-bar-row">
+                                <span class="fb-bar-label">${esc(item.label)}</span>
+                                <div class="fb-bar-track">
+                                    <div class="fb-bar-fill" style="width:${item.value}%;background:${item.color}"></div>
+                                </div>
+                                <span class="fb-bar-value">${item.value}</span>
                             </div>
-                            <span class="fb-bar-value">${s.value}</span>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>`;
-        sections.push(barChartHTML);
+                        `).join('')}
+                    </div>
+                </div>`);
+        }
 
-        // --- 2. Radar Chart (SVG) ---
         const radar = finalReport.competency_radar || {};
-        const radarLabels = ['confidence', 'clarity', 'body_language', 'content', 'star', 'voice', 'engagement'];
-        const radarDisplayLabels = ['Confidence', 'Clarity', 'Body Lang', 'Content', 'STAR', 'Voice', 'Engage'];
-        const cx = 120, cy = 105, r = 70;
-        const hasRadar = radarLabels.some(l => radar[l]);
-        if (hasRadar) {
-            const gridPolys = [0.25, 0.5, 0.75, 1].map(scale => {
-                const pts = radarLabels.map((_, i) => {
-                    const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
+        const radarKeys = ['confidence', 'clarity', 'body_language', 'content', 'star', 'voice', 'engagement'];
+        const radarNames = ['Confidence', 'Clarity', 'Body Lang', 'Content', 'STAR', 'Voice', 'Engage'];
+        if (radarKeys.some((key) => score(radar[key]) > 0)) {
+            const cx = 120;
+            const cy = 105;
+            const r = 70;
+            const angleFor = (i) => -Math.PI / 2 + (Math.PI * 2 * i) / radarKeys.length;
+
+            const gridPolys = [0.25, 0.5, 0.75, 1].map((scale) => {
+                const pts = radarKeys.map((_, i) => {
+                    const a = angleFor(i);
                     return `${cx + Math.cos(a) * r * scale},${cy + Math.sin(a) * r * scale}`;
                 }).join(' ');
                 return `<polygon points="${pts}" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="0.5"/>`;
             }).join('');
-            const dataPoly = radarLabels.map((l, i) => {
-                const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
-                const v = (radar[l] || 0) / 100;
+
+            const dataPoly = radarKeys.map((key, i) => {
+                const a = angleFor(i);
+                const v = score(radar[key]) / 100;
                 return `${cx + Math.cos(a) * r * v},${cy + Math.sin(a) * r * v}`;
             }).join(' ');
-            const labelsHTML = radarLabels.map((l, i) => {
-                const a = (-Math.PI / 2) + (Math.PI * 2 * i / radarLabels.length);
+
+            const labelsHTML = radarKeys.map((_, i) => {
+                const a = angleFor(i);
                 const lx = cx + Math.cos(a) * (r + 18);
                 const ly = cy + Math.sin(a) * (r + 18);
-                return `<text x="${lx}" y="${ly}" fill="#aaa" font-size="9" text-anchor="middle" dominant-baseline="middle">${radarDisplayLabels[i]}</text>`;
+                return `<text x="${lx}" y="${ly}" fill="#aaa" font-size="9" text-anchor="middle" dominant-baseline="middle">${esc(radarNames[i])}</text>`;
             }).join('');
+
             sections.push(`
                 <div class="fb-section">
                     <div class="fb-section-title"><span class="material-icons">radar</span> Competency Radar</div>
-                    <svg viewBox="0 0 240 210" class="fb-radar-svg">
+                    <svg viewBox="0 0 240 210" class="fb-radar-svg" role="img" aria-label="Competency radar">
                         ${gridPolys}
                         <polygon points="${dataPoly}" fill="rgba(66,133,244,0.25)" stroke="#4285f4" stroke-width="1.5"/>
                         ${labelsHTML}
@@ -670,15 +863,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>`);
         }
 
-        // --- 3. Heatmap ---
-        const heatmap = finalReport.heatmap || [];
+        const heatmap = Array.isArray(finalReport.heatmap) ? finalReport.heatmap : [];
         if (heatmap.length) {
-            const heatHTML = heatmap.map(h => {
-                const bg = h.intensity === 'high' ? '#34a853' : h.intensity === 'medium' ? '#fbbc05' : '#ea4335';
+            const heatHTML = heatmap.map((item) => {
+                const bg = item.intensity === 'high' ? '#34a853'
+                    : item.intensity === 'medium' ? '#fbbc05' : '#ea4335';
                 return `<div class="fb-heat-cell" style="border-left:3px solid ${bg}">
-                    <strong>Q${h.question_number}</strong>
-                    <span>${(h.focus_area || '').replace('_', ' ')}</span>
-                    <em>${h.overall}/100</em>
+                    <strong>Q${esc(item.question_number)}</strong>
+                    <span>${esc(String(item.focus_area || '').replace('_', ' '))}</span>
+                    <em>${score(item.overall)}/100</em>
                 </div>`;
             }).join('');
             sections.push(`
@@ -688,30 +881,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>`);
         }
 
-        // --- 4. Milestones ---
-        const milestones = finalReport.milestones || [];
+        const milestones = Array.isArray(finalReport.milestones) ? finalReport.milestones : [];
         if (milestones.length) {
             sections.push(`
                 <div class="fb-section">
                     <div class="fb-section-title"><span class="material-icons">workspace_premium</span> Milestones Earned</div>
-                    <div class="fb-badges">${milestones.map(m => `<span class="fb-badge" title="${m.description || ''}">${m.badge}</span>`).join('')}</div>
+                    <div class="fb-badges">${milestones.map((m) =>
+                        `<span class="fb-badge" title="${esc(m.description)}">${esc(m.badge)}</span>`).join('')}</div>
                 </div>`);
         }
 
-        // --- 5. Strengths & Growth ---
         if (finalReport.strengths || finalReport.improvements) {
             sections.push(`
                 <div class="fb-section fb-cols">
-                    ${finalReport.strengths ? `<div class="fb-col good"><div class="fb-col-title"><span class="material-icons">thumb_up</span> Strengths</div><p>${finalReport.strengths}</p></div>` : ''}
-                    ${finalReport.improvements ? `<div class="fb-col grow"><div class="fb-col-title"><span class="material-icons">trending_up</span> Growth Area</div><p>${finalReport.improvements}</p></div>` : ''}
+                    ${finalReport.strengths ? `<div class="fb-col good"><div class="fb-col-title"><span class="material-icons">thumb_up</span> Strengths</div><p>${esc(finalReport.strengths)}</p></div>` : ''}
+                    ${finalReport.improvements ? `<div class="fb-col grow"><div class="fb-col-title"><span class="material-icons">trending_up</span> Growth Area</div><p>${esc(finalReport.improvements)}</p></div>` : ''}
                 </div>`);
         }
 
-        // --- 6. Study Plan ---
         if (Array.isArray(finalReport.study_plan) && finalReport.study_plan.length) {
-            const planItems = finalReport.study_plan.map(item => {
-                if (typeof item === 'string') return `<li>${item}</li>`;
-                return `<li><strong>${item.area || item.focus || ''}:</strong> ${item.goal || item.drill || item.tip || JSON.stringify(item)}</li>`;
+            const planItems = finalReport.study_plan.map((item) => {
+                if (typeof item === 'string') return `<li>${esc(item)}</li>`;
+                return `<li><strong>${esc(item.area || item.focus)}:</strong> ${esc(item.goal || item.drill || item.tip)}</li>`;
             }).join('');
             sections.push(`
                 <div class="fb-section">
@@ -720,26 +911,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>`);
         }
 
-        // --- 7. Recommendations ---
         if (Array.isArray(finalReport.recommendations) && finalReport.recommendations.length) {
             sections.push(`
                 <div class="fb-section">
                     <div class="fb-section-title"><span class="material-icons">lightbulb</span> Recommendations</div>
-                    <ul class="fb-study-list">${finalReport.recommendations.map(r => `<li>${r}</li>`).join('')}</ul>
+                    <ul class="fb-study-list">${finalReport.recommendations.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
                 </div>`);
         }
 
-        // --- 8. Filler Word Summary ---
         const fws = finalReport.filler_word_summary;
         if (fws) {
             sections.push(`
                 <div class="fb-section">
                     <div class="fb-section-title"><span class="material-icons">record_voice_over</span> Filler Words</div>
-                    <p>Total: <strong>${fws.total}</strong> — Rating: <strong>${fws.rating}</strong></p>
+                    <p>Total: <strong>${esc(fws.total)}</strong> — Rating: <strong>${esc(fws.rating)}</strong></p>
+                    <p class="fb-note">Measured from your actual speech transcript.</p>
                 </div>`);
         }
 
-        document.getElementById('feedbackContent').innerHTML = sections.join('') || '<p>Session analytics have been saved.</p>';
+        document.getElementById('feedbackContent').innerHTML =
+            sections.join('') || '<p>Session analytics have been saved.</p>';
 
         const downloadBtn = document.getElementById('downloadTranscriptBtn');
         downloadBtn.disabled = false;
@@ -753,7 +944,7 @@ document.addEventListener('DOMContentLoaded', () => {
             `Company Style: ${selectedCompany}`,
             `Role: ${selectedRole}`,
             `Difficulty: ${selectedDifficulty}`,
-            `Overall Score: ${finalReport.average_score || 0}`,
+            `Overall Score: ${score(finalReport.average_score)}`,
             '',
             '=== DIALOGUE ===',
             ...dialogueHistory,
@@ -774,7 +965,6 @@ document.addEventListener('DOMContentLoaded', () => {
         isActive = false;
         stopHeartbeat();
         clearTimeout(reconnectTimeout);
-        dashboard.storeSessionSummary(finalReport);
 
         if (audioRecorder) audioRecorder.stop();
         if (audioPlayer) audioPlayer.stop();
@@ -784,19 +974,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (ws) {
             try {
-                ws.close();
+                ws.close(1000, 'Session ended');
             } catch (error) {
                 console.warn('Unable to close websocket cleanly', error);
             }
         }
     }
 
-    function showToast(message, duration = 2600) {
-        const container = document.getElementById('toastContainer');
-        const toast = document.createElement('div');
-        toast.className = 'toast';
-        toast.textContent = message;
-        container.appendChild(toast);
-        setTimeout(() => toast.remove(), duration);
-    }
+    window.addEventListener('beforeunload', () => {
+        if (isActive) cleanup();
+    });
 });

@@ -1,8 +1,37 @@
-
-
-# Ignore environment variable files with secrets
+# Secrets — never commit these
 .env
-*.env
+.env.*
+!.env.example
+*.pem
+*.key
+key_test_out.txt
 
-#Ignore vscode AI rules
-.github\instructions\codacy.instructions.md
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local scratch
+stdout.log
+*.log
+diff.txt
+Microsoft/

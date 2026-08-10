@@ -1,46 +1,44 @@
-# Byte-compiled / optimized / DLL files
+# Secrets — never let these into an image layer
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python build artifacts
 __pycache__/
 *.py[cod]
-*$py.class
-*.pyc
-
-# Virtual environments
-venv/
-env/
-.venv/
-
-# Environment variables — NEVER commit these
-.env
-.env.local
-.env.*.local
-
-# OS generated files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# IDE/Editor
-.vscode/
-.idea/
-*.swp
-
-# Logs
-*.log
-logs/
-
-# Python packaging
 *.egg-info/
 dist/
 build/
 
-# Docker
-.dockerignore
+# Virtual environments
+venv/
+.venv/
+env/
 
-# Temporary files
-tmp/
-temp/
-
-# Test artifacts
+# Tests and tooling (the image only needs app/ and requirements.txt)
+test_*.py
+pytest.ini
+list_models.py
+deploy/
+.ruff_cache/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Docs and media
+*.md
+architecture.png
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/

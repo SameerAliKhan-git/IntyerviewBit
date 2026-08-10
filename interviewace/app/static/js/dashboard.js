@@ -1,7 +1,33 @@
 /**
  * dashboard.js
  * Renders live analytics widgets without external charting libraries.
+ *
+ * Everything rendered here originates from tool arguments the model produced, which are
+ * in turn influenced by whatever the candidate said. That makes it untrusted input: all
+ * interpolated values are escaped, and numbers are coerced before use.
  */
+
+function escapeHtml(value) {
+    return String(value === undefined || value === null ? '' : value).replace(
+        /[&<>"']/g,
+        (char) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+        })[char],
+    );
+}
+
+function toScore(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return 0;
+    return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+window.escapeHtml = escapeHtml;
+window.toScore = toScore;
 
 class Dashboard {
     constructor() {
@@ -36,10 +62,15 @@ class Dashboard {
         }
 
         if (name === 'detect_filler_words') {
-            const fillers = data.detected_fillers ? Object.keys(data.detected_fillers).join(', ') : 'None';
-            if (this.elements.fillerCount) this.elements.fillerCount.textContent = String(data.total_filler_words || 0);
-            if (this.elements.fillerWords) this.elements.fillerWords.textContent = fillers;
-            if (this.elements.fillerTip) this.elements.fillerTip.textContent = data.coaching_tip || '';
+            const detected = data.detected_fillers || {};
+            const words = Object.keys(detected).length ? Object.keys(detected).join(', ') : 'None';
+            if (this.elements.fillerCount) {
+                this.elements.fillerCount.textContent = String(Number(data.total_filler_words) || 0);
+            }
+            if (this.elements.fillerWords) this.elements.fillerWords.textContent = words;
+            if (this.elements.fillerTip) {
+                this.elements.fillerTip.textContent = data.coaching_tip || '';
+            }
         }
 
         if (data.dashboard) {
@@ -48,8 +79,10 @@ class Dashboard {
 
         if (name === 'generate_session_report') {
             this.summary = { ...this.summary, ...data };
-            this.storeSessionSummary();
+            // Render against the stored previous run BEFORE overwriting it, otherwise the
+            // comparison is always this session against itself and the delta is always 0.
             this.renderComparison(data);
+            this.storeSessionSummary();
         }
     }
 
@@ -80,15 +113,16 @@ class Dashboard {
     storeSessionSummary(summary = this.summary) {
         if (!summary) return;
         const snapshot = {
-            average_score: summary.average_score || summary.history_snapshot?.average_score || 0,
-            confidence: summary.confidence || 0,
-            clarity: summary.clarity || 0,
-            body_language: summary.body_language || 0,
-            content: summary.content || 0,
-            star_score: summary.star_score || 0,
-            performance_tier: summary.performance_tier || '',
+            average_score: toScore(summary.average_score || summary.history_snapshot?.average_score),
+            confidence: toScore(summary.confidence),
+            clarity: toScore(summary.clarity),
+            body_language: toScore(summary.body_language),
+            content: toScore(summary.content),
+            star_score: toScore(summary.star_score),
+            performance_tier: String(summary.performance_tier || ''),
             timestamp: Date.now(),
         };
+        if (!snapshot.average_score) return;
         try {
             localStorage.setItem('ia_last_scores', JSON.stringify(snapshot));
             this.previousSession = snapshot;
@@ -101,26 +135,31 @@ class Dashboard {
         const el = this.elements.comparison;
         if (!el) return;
 
-        if (!this.previousSession || !current || !current.average_score) {
-            el.innerHTML = '<div class="session-note">Complete a session to compare against your previous run.</div>';
+        const currentScore = toScore(current && current.average_score);
+        if (!this.previousSession || !currentScore) {
+            el.innerHTML =
+                '<div class="session-note">Complete a session to compare against your previous run.</div>';
             return;
         }
 
-        const delta = current.average_score - this.previousSession.average_score;
+        const previousScore = toScore(this.previousSession.average_score);
+        const delta = currentScore - previousScore;
         const trend = delta > 0 ? 'Up' : delta < 0 ? 'Down' : 'Flat';
+        const deltaLabel = delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`;
+
         el.innerHTML = `
             <div class="comparison-row">
                 <div class="comparison-item">
                     <span class="comparison-label">Current</span>
-                    <strong>${current.average_score}</strong>
+                    <strong>${currentScore}</strong>
                 </div>
                 <div class="comparison-item">
                     <span class="comparison-label">Previous</span>
-                    <strong>${this.previousSession.average_score}</strong>
+                    <strong>${previousScore}</strong>
                 </div>
                 <div class="comparison-item">
                     <span class="comparison-label">Trend</span>
-                    <strong>${trend} ${delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`}</strong>
+                    <strong>${trend} ${deltaLabel}</strong>
                 </div>
             </div>
         `;
@@ -137,23 +176,30 @@ class Dashboard {
         const width = 260;
         const height = 110;
         const padding = 16;
-        const maxScore = Math.max(100, ...points.map(point => point.overall));
+        const scores = points.map((point) => toScore(point.overall));
+        const maxScore = Math.max(100, ...scores);
         const step = points.length > 1 ? (width - padding * 2) / (points.length - 1) : 0;
 
-        const coords = points.map((point, index) => {
+        const coordinate = (index) => {
             const x = padding + step * index;
-            const y = height - padding - ((point.overall / maxScore) * (height - padding * 2));
+            const y = height - padding - (scores[index] / maxScore) * (height - padding * 2);
+            return { x, y };
+        };
+
+        const polyline = scores.map((_, index) => {
+            const { x, y } = coordinate(index);
             return `${x},${y}`;
         }).join(' ');
 
+        const dots = scores.map((_, index) => {
+            const { x, y } = coordinate(index);
+            return `<circle cx="${x}" cy="${y}" r="4" class="trend-point"></circle>`;
+        }).join('');
+
         svg.innerHTML = `
             <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" class="chart-axis"></line>
-            <polyline points="${coords}" class="trend-line"></polyline>
-            ${points.map((point, index) => {
-                const x = padding + step * index;
-                const y = height - padding - ((point.overall / maxScore) * (height - padding * 2));
-                return `<circle cx="${x}" cy="${y}" r="4" class="trend-point"></circle>`;
-            }).join('')}
+            <polyline points="${polyline}" class="trend-line"></polyline>
+            ${dots}
         `;
     }
 
@@ -165,41 +211,39 @@ class Dashboard {
         const centerY = 110;
         const radius = 70;
 
-        if (!labels.some(label => radar[label])) {
+        if (!labels.some((label) => toScore(radar[label]) > 0)) {
             svg.innerHTML = '<text x="50" y="110" class="chart-placeholder">Radar fills in as scores arrive</text>';
             return;
         }
 
+        const angleFor = (index) => -Math.PI / 2 + (Math.PI * 2 * index) / labels.length;
+
         const polygon = labels.map((label, index) => {
-            const angle = (-Math.PI / 2) + (Math.PI * 2 * index / labels.length);
-            const score = (radar[label] || 0) / 100;
-            const x = centerX + Math.cos(angle) * radius * score;
-            const y = centerY + Math.sin(angle) * radius * score;
-            return `${x},${y}`;
+            const angle = angleFor(index);
+            const score = toScore(radar[label]) / 100;
+            return `${centerX + Math.cos(angle) * radius * score},${centerY + Math.sin(angle) * radius * score}`;
         }).join(' ');
 
-        const grid = [0.25, 0.5, 0.75, 1].map(scale => {
+        const grid = [0.25, 0.5, 0.75, 1].map((scale) => {
             const points = labels.map((_, index) => {
-                const angle = (-Math.PI / 2) + (Math.PI * 2 * index / labels.length);
-                const x = centerX + Math.cos(angle) * radius * scale;
-                const y = centerY + Math.sin(angle) * radius * scale;
-                return `${x},${y}`;
+                const angle = angleFor(index);
+                return `${centerX + Math.cos(angle) * radius * scale},${centerY + Math.sin(angle) * radius * scale}`;
             }).join(' ');
             return `<polygon points="${points}" class="radar-grid"></polygon>`;
         }).join('');
 
         const spokes = labels.map((_, index) => {
-            const angle = (-Math.PI / 2) + (Math.PI * 2 * index / labels.length);
+            const angle = angleFor(index);
             const x = centerX + Math.cos(angle) * radius;
             const y = centerY + Math.sin(angle) * radius;
             return `<line x1="${centerX}" y1="${centerY}" x2="${x}" y2="${y}" class="radar-spoke"></line>`;
         }).join('');
 
         const text = labels.map((label, index) => {
-            const angle = (-Math.PI / 2) + (Math.PI * 2 * index / labels.length);
+            const angle = angleFor(index);
             const x = centerX + Math.cos(angle) * (radius + 20);
             const y = centerY + Math.sin(angle) * (radius + 20);
-            return `<text x="${x}" y="${y}" class="radar-label">${label.replace('_', ' ')}</text>`;
+            return `<text x="${x}" y="${y}" class="radar-label">${escapeHtml(label.replace('_', ' '))}</text>`;
         }).join('');
 
         svg.innerHTML = `${grid}${spokes}<polygon points="${polygon}" class="radar-area"></polygon>${text}`;
@@ -212,13 +256,15 @@ class Dashboard {
             el.innerHTML = '<div class="session-note">Heatmap appears after the first scored answer.</div>';
             return;
         }
-        el.innerHTML = heatmap.map(item => `
-            <div class="heat-cell ${item.intensity}">
-                <strong>Q${item.question_number}</strong>
-                <span>${item.focus_area.replace('_', ' ')}</span>
-                <em>${item.overall}</em>
-            </div>
-        `).join('');
+        el.innerHTML = heatmap.map((item) => {
+            const intensity = ['high', 'medium', 'low'].includes(item.intensity) ? item.intensity : 'low';
+            return `
+            <div class="heat-cell ${intensity}">
+                <strong>Q${escapeHtml(item.question_number)}</strong>
+                <span>${escapeHtml(String(item.focus_area || '').replace('_', ' '))}</span>
+                <em>${toScore(item.overall)}</em>
+            </div>`;
+        }).join('');
     }
 
     renderMilestones(milestones) {
@@ -228,8 +274,8 @@ class Dashboard {
             el.innerHTML = '<span class="session-note">Badges unlock as you practice.</span>';
             return;
         }
-        el.innerHTML = milestones.map(item => `
-            <span class="mini-pill" title="${item.description}">${item.badge}</span>
+        el.innerHTML = milestones.map((item) => `
+            <span class="mini-pill" title="${escapeHtml(item.description)}">${escapeHtml(item.badge)}</span>
         `).join('');
     }
 
@@ -240,11 +286,11 @@ class Dashboard {
             el.innerHTML = '<div class="session-note">Your next drills will appear here.</div>';
             return;
         }
-        el.innerHTML = items.map(item => `
+        el.innerHTML = items.map((item) => `
             <div class="learning-item">
-                <strong>${item.area}</strong>
-                <span>${item.goal}</span>
-                <em>${item.drill}</em>
+                <strong>${escapeHtml(item.area)}</strong>
+                <span>${escapeHtml(item.goal)}</span>
+                <em>${escapeHtml(item.drill)}</em>
             </div>
         `).join('');
     }
@@ -256,19 +302,20 @@ class Dashboard {
             el.innerHTML = '<div class="session-note">Role-specific tips will appear once the session context is known.</div>';
             return;
         }
-        el.innerHTML = items.map(item => `
+        el.innerHTML = items.map((item) => `
             <div class="learning-item compact">
-                <span>${item}</span>
+                <span>${escapeHtml(item)}</span>
             </div>
         `).join('');
     }
 
     _updateMetric(valueId, barId, value) {
         if (value === undefined || value === null) return;
+        const score = toScore(value);
         const valueEl = document.getElementById(valueId);
         const barEl = document.getElementById(barId);
-        if (valueEl) valueEl.textContent = value;
-        if (barEl) barEl.style.width = `${value}%`;
+        if (valueEl) valueEl.textContent = String(score);
+        if (barEl) barEl.style.width = `${score}%`;
     }
 
     _loadPreviousSession() {
